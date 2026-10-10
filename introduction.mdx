@@ -33,8 +33,11 @@ Notify is a foundational dependency in many well-known Rust projects and develop
 - **[mdBook](https://github.com/rust-lang-nursery/mdBook)** — Rust documentation builder
 - **[Alacritty](https://github.com/jwilm/alacritty)** — GPU-accelerated terminal emulator
 - **[cargo-watch](https://github.com/passcod/cargo-watch)** — re-run Cargo commands on file change
+- **[Cobalt](https://github.com/cobalt-org/cobalt.rs)** — static site generator in Rust
+- **[Docket](https://iwillspeak.github.io/docket/)** — documentation tool
 - **[watchexec](https://github.com/mattgreen/watchexec)** — execute commands on filesystem change
 - **[watchfiles](https://watchfiles.helpmanual.io/)** — Python file-watching powered by Notify
+- **[xi-editor](https://xi-editor.io/)** — experimental text editor
 
 ## Workspace Crates
 
@@ -78,5 +81,11 @@ Notify was inspired by Go's [fsnotify](https://github.com/fsnotify/fsnotify) and
   </Card>
   <Card title="Installation" icon="box" href="/installation">
     Add Notify to your `Cargo.toml` and configure feature flags for your target platform.
+  </Card>
+  <Card title="Watchers" icon="eye" href="/concepts/watchers">
+    Learn how native and poll-based watcher backends work and when to use each one.
+  </Card>
+  <Card title="Watcher Trait" icon="code" href="/api/watcher-trait">
+    Full API reference for the `Watcher` trait: `watch`, `unwatch`, `update_paths`, and more.
   </Card>
 </CardGroup>

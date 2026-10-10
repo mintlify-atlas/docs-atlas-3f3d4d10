@@ -1,7 +1,7 @@
 ---
-title: "Error Types in notify"
+title: "Error Types in notify — Error, ErrorKind, and Result"
 sidebarTitle: "Errors"
-description: "Reference for notify::Error, ErrorKind, Result, and UpdatePathsError: covers all error variants, their fields, and the partial-failure UpdatePathsError for update_paths()."
+description: "Reference for notify::Error, ErrorKind variants, the Result type alias, and UpdatePathsError with its partial-failure recovery pattern for update_paths()."
 ---
 
 notify uses a small, focused error hierarchy. The main types are `Error` (a concrete struct carrying a kind and a list of affected paths), `ErrorKind` (the discriminant enum), the `Result<T>` type alias, and `UpdatePathsError` (a richer error returned by `Watcher::update_paths` that includes the remaining unprocessed operations for recovery).
@@ -44,6 +44,7 @@ pub struct Error {
 | `Error::new(kind: ErrorKind) -> Self` | Creates an error with empty paths. |
 | `Error::generic(msg: &str) -> Self` | Creates a `Generic` error from a string. |
 | `Error::io(err: io::Error) -> Self` | Wraps a standard `io::Error`. |
+| `Error::io_watch(err: io::Error) -> Self` | Like `io`, but maps `io::ErrorKind::NotFound` to `PathNotFound`. Used internally when watching a path that doesn't exist. |
 | `Error::path_not_found() -> Self` | Creates a `PathNotFound` error. |
 | `Error::watch_not_found() -> Self` | Creates a `WatchNotFound` error. |
 | `Error::invalid_config(config: &Config) -> Self` | Creates an `InvalidConfig` error. |

@@ -1,7 +1,7 @@
 ---
-title: "Config — Watcher Backend Configuration"
+title: "Config — notify Watcher Backend Configuration Options"
 sidebarTitle: "Config"
-description: "Reference for notify::Config: poll interval, content comparison, symlink following, EventKindMask, FSEvents latency, Windows path separator, and WatchPathConfig."
+description: "Reference for notify::Config: poll interval, content hashing, symlink following, EventKindMask, FSEvents latency, Windows separator, and WatchPathConfig."
 ---
 
 `Config` is the primary way to customise watcher behaviour at construction time, and for some backends at runtime via `Watcher::configure`. It is a plain value type — `Copy + Clone + Debug + Hash + Eq` — and uses a builder pattern where every setter returns a new `Self`.

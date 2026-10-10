@@ -1,7 +1,7 @@
 ---
-title: "Migrate from notify v4 to v5"
+title: "notify v4 to v5 Migration Guide: Complete API Changes"
 sidebarTitle: "v4 → v5"
-description: "Upgrade guide from the legacy notify v4 API to v5: new event taxonomy, Watcher trait changes, error types, and configuration model."
+description: "Upgrade guide from notify v4 to v5: new event taxonomy, debouncer extraction, Watcher trait changes, unified Config, and error type updates."
 ---
 
 notify v5 is a significant redesign of the library's public API. The event model was rebuilt from scratch around a precise, platform-neutral taxonomy, the debouncing layer was extracted into separate crates, the `Watcher` trait was simplified, and the configuration model was unified. This guide covers every breaking change with before-and-after examples so you can upgrade with confidence.

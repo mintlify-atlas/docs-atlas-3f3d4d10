@@ -1,7 +1,7 @@
 ---
-title: "Known Issues and Platform Quirks in Notify"
+title: "Known Issues and Platform-Specific Quirks in Notify"
 sidebarTitle: "Known Issues"
-description: "Comprehensive guide to Notify's known limitations by platform: network filesystems, Docker M1, FSEvents security, editor behavior, /proc, inotify limits, and more."
+description: "Guide to Notify's known limitations by platform: network filesystems, Docker M1, FSEvents security, editor behavior, inotify limits, and workarounds."
 ---
 
 Notify strives to present a uniform filesystem-watching API across all supported platforms, but each platform's underlying notification mechanism has its own quirks, limits, and blind spots. This page documents every known issue, explains why it happens, and gives you a concrete workaround for each one. Expand an entry to read the full details.
@@ -69,7 +69,7 @@ watcher.watch(Path::new("/mnt/c/Users/me/projects"), RecursiveMode::Recursive)?;
 
 Docker on macOS M1 runs Linux containers inside an emulation layer. The native FSEvents backend is not available inside that environment and throws the error:
 
-```
+```text
 Function not implemented (os error 38)
 ```
 
@@ -304,7 +304,7 @@ On Linux, the inotify backend creates one kernel watch descriptor per file and d
 - `fs.inotify.max_user_watches` — maximum number of watch descriptors across all instances for a user. For recursive watches, every file **and** directory inside the watched tree counts towards this limit.
 
 When these limits are exceeded, the watcher returns errors like:
-```
+```text
 Bad file descriptor (os error 9)
 No space left on device (os error 28)
 ```

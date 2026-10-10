@@ -1,7 +1,7 @@
 ---
 title: "Platform Backends: How Notify Watches Files Natively"
 sidebarTitle: "Backends"
-description: "Understand the platform-specific backend Notify uses on each OS: inotify, FSEvents, kqueue, ReadDirectoryChangesW, and the cross-platform PollWatcher fallback."
+description: "The platform-specific backends Notify uses per OS: inotify, FSEvents, kqueue, ReadDirectoryChangesW, and the PollWatcher fallback for all platforms."
 ---
 
 Notify is designed around native OS APIs. On each platform, it selects the most capable available backend and exposes it through the uniform `Watcher` trait. The type alias `RecommendedWatcher` always resolves to the best choice for the current target, so most code never needs to name a concrete backend.

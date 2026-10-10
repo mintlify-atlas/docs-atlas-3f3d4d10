@@ -159,7 +159,7 @@ The cache records file system IDs so the debouncer can stitch rename pairs even 
 
 | Type | Description |
 |---|---|
-| `RecommendedCache` | Uses `FileIdMap` on macOS and Windows; falls back to `NoCache` on Linux, Android, and WASM |
+| `RecommendedCache` | Uses `FileIdMap` on all non-Linux, non-Android, non-WASM targets (e.g. macOS, Windows, BSD); falls back to `NoCache` on Linux, Android, and WASM |
 | `NoCache` | No file ID tracking. Rename stitching falls back to tracker IDs only |
 | `FileIdMap` | Explicit file ID map. Available on all non-WASM targets |
 
@@ -185,6 +185,14 @@ impl FileIdCache for MyCache {
 
     fn remove_path(&mut self, path: &Path) {
         // Called when a path is deleted.
+    }
+
+    // `rescan` has a default implementation that calls `add_path` for each root path.
+    // Override this if you need custom behaviour when the backend signals a dropped-event rescan.
+    fn rescan(&mut self, root_paths: &[(PathBuf, RecursiveMode)]) {
+        for (path, recursive_mode) in root_paths {
+            self.add_path(path, *recursive_mode);
+        }
     }
 }
 ```
@@ -277,7 +285,7 @@ impl DebounceEventHandler for EventPrinter {
 | `tokio` | ❌ | `tokio::sync::mpsc::UnboundedSender` as a handler |
 
 <Tip>
-On Linux and Android, `RecommendedCache` resolves to `NoCache` because inotify provides reliable tracker IDs for rename stitching without needing to read file IDs from disk. File ID tracking is only needed on macOS (FSEvents) and Windows where tracker IDs are not always available.
+On Linux, Android, and WASM, `RecommendedCache` resolves to `NoCache` because inotify provides reliable tracker IDs for rename stitching without needing to read file IDs from disk. File ID tracking is only needed on platforms such as macOS (FSEvents) and Windows where tracker IDs are not always available.
 </Tip>
 
 <CardGroup cols={2}>

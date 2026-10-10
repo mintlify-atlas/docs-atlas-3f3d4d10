@@ -1,7 +1,7 @@
 ---
-title: "Filtering Filesystem Events with EventKindMask"
+title: "Filtering Filesystem Events by Kind with EventKindMask"
 sidebarTitle: "Event Filtering"
-description: "Filter delivered filesystem events at the kernel level on inotify or in userspace on other backends using Config::with_event_kinds() and EventKindMask bitflags."
+description: "Filter filesystem events at the kernel level on inotify or in userspace on other backends using Config::with_event_kinds() and EventKindMask bitflags."
 ---
 
 Every file operation on a modern operating system generates multiple kernel events. A single `cat` command can produce an `OPEN`, one or more `READ`, and a `CLOSE_NOWRITE` event — none of which represent a meaningful change to the file's content. By default, `notify` delivers all of these through `EventKindMask::ALL`. For most applications, this is too much noise. `EventKindMask` is a bitflags type that lets you declare exactly which event categories you care about, reducing callback frequency and, on Linux's inotify backend, avoiding unnecessary wakeups at the kernel level.
@@ -11,13 +11,17 @@ Every file operation on a modern operating system generates multiple kernel even
 | Constant | What it covers |
 |---|---|
 | `EventKindMask::ALL` | Every event kind, including access events (default) |
-| `EventKindMask::CORE` | `CREATE \| REMOVE \| MODIFY_DATA \| MODIFY_META \| MODIFY_NAME` — no access events |
+| `EventKindMask::CORE` | `CREATE \| REMOVE \| ALL_MODIFY` — excludes all access events |
 | `EventKindMask::CREATE` | File or directory creation |
 | `EventKindMask::REMOVE` | File or directory deletion |
 | `EventKindMask::MODIFY_DATA` | File content changes |
 | `EventKindMask::MODIFY_META` | Metadata changes (permissions, timestamps, etc.) |
 | `EventKindMask::MODIFY_NAME` | Renames and moves |
-| `EventKindMask::ALL_ACCESS` | Open, close, and other access events |
+| `EventKindMask::ALL_MODIFY` | `MODIFY_DATA \| MODIFY_META \| MODIFY_NAME` — all modification subtypes |
+| `EventKindMask::ACCESS_OPEN` | File open events |
+| `EventKindMask::ACCESS_CLOSE` | File close-after-write events |
+| `EventKindMask::ACCESS_CLOSE_NOWRITE` | File close-without-write events (read-only closes) |
+| `EventKindMask::ALL_ACCESS` | `ACCESS_OPEN \| ACCESS_CLOSE \| ACCESS_CLOSE_NOWRITE` |
 
 Constants can be combined with the bitwise OR operator (`|`) to create any custom mask.
 

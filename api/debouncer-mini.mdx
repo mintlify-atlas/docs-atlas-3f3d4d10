@@ -12,14 +12,14 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-notify-debouncer-mini = "0.6.0"
+notify-debouncer-mini = "0.7.0"
 ```
 
 If you need to enable specific notify backend features, declare `notify` explicitly alongside the debouncer:
 
 ```toml
 [dependencies]
-notify-debouncer-mini = "0.6.0"
+notify-debouncer-mini = "0.7.0"
 notify = { version = "...", features = ["..."] }
 ```
 
@@ -268,18 +268,6 @@ Returns a `Config` with:
 
 <ResponseField name="with_notify_config(notify_config: notify::Config) -> Self" type="builder">
   Pass a custom `notify::Config` to the underlying watcher backend.
-</ResponseField>
-
-<ResponseField name="timeout() -> Duration" type="getter">
-  Returns the configured timeout.
-</ResponseField>
-
-<ResponseField name="batch_mode() -> bool" type="getter">
-  Returns whether batch mode is enabled.
-</ResponseField>
-
-<ResponseField name="notify_config() -> &notify::Config" type="getter">
-  Returns a reference to the underlying notify configuration.
 </ResponseField>
 
 ---

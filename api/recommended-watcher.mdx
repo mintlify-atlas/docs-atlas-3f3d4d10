@@ -1,7 +1,7 @@
 ---
-title: "recommended_watcher() and RecommendedWatcher"
+title: "recommended_watcher() — notify Watcher Constructor"
 sidebarTitle: "RecommendedWatcher"
-description: "Reference for notify::recommended_watcher() and the RecommendedWatcher type alias — the easiest way to create the best available watcher for the current platform."
+description: "Reference for notify::recommended_watcher() and RecommendedWatcher: the easiest way to create the best native backend watcher for your target platform."
 ---
 
 `recommended_watcher` is the most ergonomic entry point into notify. It constructs a `RecommendedWatcher` — a type alias that resolves to the best native backend for the platform you compile for — without requiring you to name the concrete type. Under the hood it simply calls `RecommendedWatcher::new(event_handler, Config::default())`.

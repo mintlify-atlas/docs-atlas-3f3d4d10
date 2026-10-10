@@ -1,7 +1,7 @@
 ---
-title: "Watchers: The Core of Notify's File Watching API"
+title: "Notify Watcher Trait: Create, Watch, and Manage Paths"
 sidebarTitle: "Watchers"
-description: "Learn how the Watcher trait works in Notify, how to create watchers, watch and unwatch paths, and use batch path operations with update_paths()."
+description: "How the Notify Watcher trait works: create watchers, watch and unwatch paths, batch operations with update_paths(), and query watched paths at runtime."
 ---
 
 The `Watcher` trait is the central abstraction in Notify. Every backend — whether it uses inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows, or a simple poll loop — implements `Watcher`, giving you a single consistent interface regardless of which platform your code runs on.

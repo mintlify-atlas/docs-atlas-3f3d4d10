@@ -1,7 +1,7 @@
 ---
-title: "Understanding Filesystem Events in Notify"
+title: "Notify Event Types: EventKind, Subtypes, and Filtering"
 sidebarTitle: "Events"
-description: "Explore Notify's event taxonomy: Event, EventKind, and all subtypes including AccessKind, CreateKind, ModifyKind, RemoveKind, and EventKindMask for filtering."
+description: "Notify's event taxonomy: the Event struct, EventKind hierarchy, AccessKind, CreateKind, ModifyKind, RemoveKind subtypes, and EventKindMask for filtering."
 ---
 
 Every change the OS reports to Notify is delivered as an `Event` value. Understanding the event taxonomy — the nested enums that describe *what* happened and *how precisely* the backend knows it — lets you write handlers that react only to the activity you care about and ignore everything else.

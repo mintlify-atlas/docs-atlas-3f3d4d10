@@ -1,7 +1,7 @@
 ---
 title: "file-id: Stable File Identity via Inode and File IDs"
 sidebarTitle: "file-id"
-description: "Reference for the file-id crate: get_file_id(), get_file_id_no_follow(), and the FileId enum with Inode, LowRes, and HighRes variants for stable file identification."
+description: "Reference for file-id: get_file_id(), get_file_id_no_follow(), Windows-only ID functions, and the FileId enum with Inode, LowRes, and HighRes variants."
 ---
 
 `file-id` is a small utility crate for reading the low-level, OS-assigned identifiers that uniquely name a file on a single computer. On Linux and macOS these are called *inode numbers*; on Windows they are called *file IDs* or *file indexes*. Combined with a device ID (Unix) or volume serial number (Windows), a `FileId` lets you reliably detect whether two paths refer to the same underlying file — even across renames — without relying on the path itself.
@@ -79,6 +79,32 @@ Opens the file and calls `GetFileInformationByHandleEx` with `FileIdInfo` to obt
 
 <ParamField path="path" type="impl AsRef<Path>" required>
   Path to the file or directory. Follows reparse points.
+</ParamField>
+
+#### `get_low_res_file_id_no_follow`
+
+```rust
+#[cfg(target_family = "windows")]
+pub fn get_low_res_file_id_no_follow(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Like `get_low_res_file_id`, but opens the file with `FILE_FLAG_OPEN_REPARSE_POINT` so the ID of the reparse point itself is returned rather than its target.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file, directory, or reparse point. Does not follow reparse points.
+</ParamField>
+
+#### `get_high_res_file_id_no_follow`
+
+```rust
+#[cfg(target_family = "windows")]
+pub fn get_high_res_file_id_no_follow(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Like `get_high_res_file_id`, but opens the file with `FILE_FLAG_OPEN_REPARSE_POINT` so the high-resolution ID of the reparse point itself is returned rather than its target. Available on Windows Vista and above.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file, directory, or reparse point. Does not follow reparse points.
 </ParamField>
 
 <Tip>
@@ -172,6 +198,13 @@ println!("{file_id:?}");
 
 // High-resolution ID (Windows Vista+)
 let file_id = file_id::get_high_res_file_id(file.path()).unwrap();
+println!("{file_id:?}");
+
+// Without following reparse points (Windows Vista+)
+let file_id = file_id::get_low_res_file_id_no_follow(file.path()).unwrap();
+println!("{file_id:?}");
+
+let file_id = file_id::get_high_res_file_id_no_follow(file.path()).unwrap();
 println!("{file_id:?}");
 ```
 

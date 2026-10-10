@@ -1,5 +1,5 @@
 ---
-title: "Installing Notify in Your Rust Project"
+title: "Notify Installation: Cargo.toml Setup and Feature Flags"
 sidebarTitle: "Installation"
 description: "Add notify and its companion debouncer and file-id crates to Cargo.toml, and configure optional Cargo features for serde, async, and platform backends."
 ---
@@ -26,7 +26,7 @@ Raw filesystem events can be extremely noisy — a single editor save may genera
 
   ```toml
   [dependencies]
-  notify-debouncer-mini = "0.6.0"
+  notify-debouncer-mini = "0.7.0"
   ```
 
   </Tab>
@@ -47,7 +47,7 @@ Raw filesystem events can be extremely noisy — a single editor save may genera
 
   ```toml
   [dependencies]
-  notify-debouncer-mini = "0.6.0"
+  notify-debouncer-mini = "0.7.0"
   notify = { version = "9.0.0-rc.5", features = ["serde"] }
   ```
 </Note>
@@ -146,15 +146,20 @@ notify = { version = "9.0.0-rc.5", default-features = false, features = ["macos_
 
 ## Feature Flags: Debouncer Crates
 
-Both `notify-debouncer-mini` and `notify-debouncer-full` support the same async channel features as `notify`:
+Both `notify-debouncer-mini` and `notify-debouncer-full` expose the following optional Cargo features:
 
-| Feature | Description |
-|---|---|
-| `serde` | Serialization support for debouncer event types. |
-| `tokio` | `EventHandler` impl for `tokio::sync::mpsc::UnboundedSender`. |
-| `futures` | `EventHandler` impl for `futures::channel::mpsc::UnboundedSender`. |
-| `crossbeam-channel` | `EventHandler` impl for `crossbeam_channel::Sender`. |
-| `flume` | `EventHandler` impl for `flume::Sender`. |
+| Feature | Description | `debouncer-mini` | `debouncer-full` |
+|---|---|---|---|
+| `serde` | Serialization support for debouncer event types. | ✅ | ✅ |
+| `tokio` | `EventHandler` impl for `tokio::sync::mpsc::UnboundedSender`. | ✅ | ✅ |
+| `futures` | `EventHandler` impl for `futures::channel::mpsc::UnboundedSender`. | ✅ | ✅ |
+| `crossbeam-channel` | `EventHandler` impl for `crossbeam_channel::Sender`. | ✅ | ✅ |
+| `flume` | `EventHandler` impl for `flume::Sender`. | ✅ | ✅ |
+| `macos_fsevent` | FSEvents backend on macOS (enabled by default). | ✅ | ✅ |
+| `macos_kqueue` | Use kqueue instead of FSEvents on macOS. | ✅ | ✅ |
+| `freebsd_inotify` | Force inotify when cross-compiling for FreeBSD 14.5+. | ✅ | ✅ |
+| `serialization-compat-6` | Restore notify 6.x serialization format. | ✅ | ✅ |
+| `web-time` | Use `web-time` for WASM-compatible timestamps. | ❌ | ✅ |
 
 Enable a feature on the debouncer crate the same way you would on `notify`:
 

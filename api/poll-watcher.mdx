@@ -1,7 +1,7 @@
 ---
-title: "PollWatcher — Cross-Platform Polling Fallback"
+title: "PollWatcher — notify Polling Watcher API Reference"
 sidebarTitle: "PollWatcher"
-description: "Reference for notify::PollWatcher: polling-based filesystem watcher that works on network mounts, pseudo filesystems, and any platform without native events."
+description: "Reference for notify::PollWatcher: new(), with_initial_scan(), poll(), poll_blocking(), and Config options for poll interval and content hashing."
 ---
 
 `PollWatcher` is a filesystem watcher built entirely on Rust's standard library. Instead of registering for OS-level kernel notifications, it periodically scans the watched paths, compares metadata (and optionally file content hashes) against a stored snapshot, and emits events for anything that changed. Because it relies on no OS-specific API, it works everywhere — including network mounts, pseudo filesystems such as `/proc` and `/sys`, Docker containers where the native backend is unavailable, and WSL programs watching Windows paths.

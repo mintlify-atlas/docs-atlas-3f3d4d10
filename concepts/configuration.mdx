@@ -1,7 +1,7 @@
 ---
-title: "Configuring Notify Watchers and Backends"
+title: "Notify Config: Poll Interval, Event Filtering, and More"
 sidebarTitle: "Configuration"
-description: "Reference for the Config struct: poll interval, content comparison, symlink following, event kind filtering, FSEvents latency, and Windows path separator settings."
+description: "Notify Config struct reference: poll interval, content hashing, symlink following, EventKindMask filtering, FSEvents latency, and Windows separator style."
 ---
 
 Notify's `Config` struct is the single place to tune watcher behaviour at construction time. It uses a builder pattern — every setter returns a new `Config` value so chains can be written inline — and all fields implement `Copy`, making the struct cheap to pass around. Some options can also be applied to a running watcher via `Watcher::configure`.
@@ -206,7 +206,7 @@ watcher.watch_with(Path::new("/data/link"), path_config)?;
 | Method | Default | Applies to |
 |---|---|---|
 | `new(RecursiveMode)` | — | All backends |
-| `with_recursive_mode(RecursiveMode)` | `RecursiveMode::Recursive` | All backends |
+| `with_recursive_mode(RecursiveMode)` | — | All backends |
 | `with_dereference_symlinks(bool)` | `true` | INotifyWatcher, NonRecursive watches |
 
 Backends that do not implement a particular option silently ignore it and fall back to the `watch(path, recursive_mode)` behaviour.

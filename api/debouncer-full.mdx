@@ -1,7 +1,7 @@
 ---
 title: "notify-debouncer-full API Reference"
 sidebarTitle: "debouncer-full"
-description: "Full API reference for notify-debouncer-full: new_debouncer(), new_debouncer_opt(), Debouncer, FileIdCache, RecommendedCache, NoCache, DebouncedEvent, and DebounceEventHandler."
+description: "API reference for notify-debouncer-full: new_debouncer(), new_debouncer_opt(), Debouncer, FileIdCache, RecommendedCache, NoCache, and DebouncedEvent types."
 ---
 
 `notify-debouncer-full` is a feature-rich debouncing layer built on top of [notify](https://docs.rs/notify). In addition to suppressing duplicate events, it performs intelligent event stitching: it merges split `Rename` event pairs, updates buffered paths when a rename arrives, collapses cascading removes for whole directory trees (inotify), and suppresses `Modify` events that immediately follow a `Create`. It optionally tracks file-system IDs (inodes on Linux/macOS, file IDs on Windows) to correctly stitch renames even when the OS delivers events out of order.
@@ -219,6 +219,12 @@ pub fn configure(&mut self, option: notify::Config) -> notify::Result<bool>
 
 Reconfigure the underlying watcher at runtime.
 
+```rust
+pub fn kind() -> WatcherKind
+```
+
+Returns the `WatcherKind` of the underlying watcher backend `T`. This is an associated function (not a method) and can be called as `Debouncer::<T, C>::kind()`.
+
 <Warning>
   The `watcher()` and `cache()` methods are `#[deprecated]` in the current source. Use `watch()`, `unwatch()`, and `update_paths()` on `Debouncer` directly instead — these keep the cache automatically consistent.
 </Warning>
@@ -274,7 +280,8 @@ pub trait FileIdCache {
     fn cached_file_id(&self, path: &Path) -> Option<impl AsRef<FileId>>;
     fn add_path(&mut self, path: &Path, recursive_mode: RecursiveMode);
     fn remove_path(&mut self, path: &Path);
-    fn rescan(&mut self, root_paths: &[(PathBuf, RecursiveMode)]);
+    // Provided default: calls add_path for each root path
+    fn rescan(&mut self, root_paths: &[(PathBuf, RecursiveMode)]) { ... }
 }
 ```
 

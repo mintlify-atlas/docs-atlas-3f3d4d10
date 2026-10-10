@@ -1,7 +1,7 @@
 ---
-title: "Migrate from notify v8 to v9"
+title: "notify v8 to v9 Migration Guide: All Breaking Changes"
 sidebarTitle: "v8 → v9"
-description: "Upgrade guide for notify v8 to v9: replace paths_mut with update_paths(), understand new path representation semantics, and learn about event-kind filtering."
+description: "Step-by-step guide to upgrade notify from v8 to v9: update batch-watch calls, handle path representation changes, and opt into event-kind filtering."
 ---
 
 notify v9 ships a focused set of breaking changes that clean up the batch-watch API, nail down path-representation semantics, and unify how repeated `watch` calls behave. Most codebases only need to update the batch-watch call sites and verify that any relative watch paths are intentional. The sections below walk through each change with before-and-after examples.
@@ -78,12 +78,14 @@ A new MSRV policy accompanies this change — consult the notify README for the 
 Because `remaining` gives you back the un-attempted operations, you can place `update_paths` in a loop and retry only what was not processed:
 
 ```rust
+use std::path::PathBuf;
 use notify::{PathOp, Watcher};
 
+// watcher is an already-created RecommendedWatcher or similar.
 let mut paths_to_add = vec![
-    PathOp::watch_recursive(existing_dir_1.clone()),
-    PathOp::watch_recursive(not_existent_file.clone()),
-    PathOp::watch_recursive(existing_dir_2.clone()),
+    PathOp::watch_recursive(PathBuf::from("/data/logs")),
+    PathOp::watch_recursive(PathBuf::from("/tmp/does-not-exist-yet")),
+    PathOp::watch_recursive(PathBuf::from("/data/config")),
 ];
 
 while !paths_to_add.is_empty() {

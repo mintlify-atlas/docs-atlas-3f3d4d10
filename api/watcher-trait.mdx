@@ -1,7 +1,7 @@
 ---
-title: "Watcher Trait — notify API Reference"
+title: "Watcher Trait — notify Rust Crate Full API Reference"
 sidebarTitle: "Watcher"
-description: "Full reference for the notify::Watcher trait: new(), watch(), unwatch(), update_paths(), configure(), watched_paths(), and kind() with type signatures and examples."
+description: "Reference for the notify::Watcher trait: new(), watch(), unwatch(), configure(), watched_paths(), kind(), and the EventHandler implementations."
 ---
 
 The `Watcher` trait is the central abstraction in notify. Every backend — inotify, FSEvents, kqueue, ReadDirectoryChanges, and the polling fallback — implements it, which means your application code can work with any backend through a single interface. You register paths with `watch`, receive filesystem events through the `EventHandler` you passed at construction time, and clean up by calling `unwatch` or simply dropping the watcher.
@@ -22,7 +22,7 @@ pub trait Watcher {
 
     fn unwatch(&mut self, path: &Path) -> Result<()>;
 
-    fn update_paths(&mut self, ops: Vec<PathOp>) -> Result<(), UpdatePathsError>;
+    fn update_paths(&mut self, ops: Vec<PathOp>) -> std::result::Result<(), UpdatePathsError>;
 
     fn configure(&mut self, option: Config) -> Result<bool>;
 
@@ -126,7 +126,7 @@ Adds or removes multiple paths in a single batch operation. For some backends (m
   A list of `PathOp::Watch(…)` and `PathOp::Unwatch(…)` operations applied in order. See [`PathOp`](/api/config#pathop).
 </ParamField>
 
-**Returns** `Result<(), UpdatePathsError>`. When an error occurs, processing halts and `UpdatePathsError` reports the failing operation (`origin`) and all operations that were not attempted (`remaining`). See [`UpdatePathsError`](/api/errors#updatepathserror).
+**Returns** `std::result::Result<(), UpdatePathsError>`. When an error occurs, processing halts and `UpdatePathsError` reports the failing operation (`origin`) and all operations that were not attempted (`remaining`). See [`UpdatePathsError`](/api/errors#updatepathserror).
 
 ```rust
 use notify::{NullWatcher, PathOp, Watcher};

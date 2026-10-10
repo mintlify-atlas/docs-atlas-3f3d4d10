@@ -1,7 +1,7 @@
 ---
-title: "Event and EventKind — Filesystem Event Types"
+title: "Event and EventKind — notify Filesystem Event Types"
 sidebarTitle: "Events"
-description: "Complete reference for notify's Event struct, the EventKind hierarchy, EventAttributes, EventKindMask bitflags, and all sub-enums for access, create, modify, and remove events."
+description: "Reference for notify's Event struct, EventKind hierarchy, EventAttributes, and sub-enums for access, create, modify, and remove filesystem events."
 ---
 
 Every filesystem change delivered by a notify watcher arrives as a `Result<Event>`. The `Event` struct carries the kind of change that occurred, the paths it affected, and optional platform-provided metadata through `EventAttributes`. Understanding the `EventKind` hierarchy lets you write precise event-handling logic and configure `EventKindMask` to receive only the events you care about.
@@ -64,7 +64,6 @@ impl Event {
 `EventKind` is the top-level classification for every event. Most application code matches on one of the four substantive variants.
 
 ```rust
-#[non_exhaustive]
 pub enum EventKind {
     /// Unknown or unclassifiable event (catch-all).
     Any,
