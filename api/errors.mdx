@@ -1,0 +1,214 @@
+---
+title: "Error Types in notify"
+sidebarTitle: "Errors"
+description: "Reference for notify::Error, ErrorKind, Result, and UpdatePathsError: covers all error variants, their fields, and the partial-failure UpdatePathsError for update_paths()."
+---
+
+notify uses a small, focused error hierarchy. The main types are `Error` (a concrete struct carrying a kind and a list of affected paths), `ErrorKind` (the discriminant enum), the `Result<T>` type alias, and `UpdatePathsError` (a richer error returned by `Watcher::update_paths` that includes the remaining unprocessed operations for recovery).
+
+---
+
+## `type Result<T>`
+
+```rust
+pub type Result<T> = std::result::Result<T, Error>;
+```
+
+All fallible notify APIs return `notify::Result<T>`. The `?` operator converts it naturally in any function that returns `notify::Result` or `Box<dyn std::error::Error>`.
+
+---
+
+## `Error` struct
+
+```rust
+pub struct Error {
+    pub kind: ErrorKind,
+    pub paths: Vec<PathBuf>,
+}
+```
+
+<ResponseField name="kind" type="ErrorKind">
+  The error variant. See [ErrorKind](#errorkind-enum) for all variants.
+</ResponseField>
+
+<ResponseField name="paths" type="Vec<PathBuf>">
+  The filesystem paths associated with this error, if any. May be empty for errors that are not path-specific (e.g. internal channel failures).
+</ResponseField>
+
+`Error` implements `std::error::Error`, `std::fmt::Display`, and `From<io::Error>`.
+
+### Constructor methods
+
+| Method | Description |
+|--------|-------------|
+| `Error::new(kind: ErrorKind) -> Self` | Creates an error with empty paths. |
+| `Error::generic(msg: &str) -> Self` | Creates a `Generic` error from a string. |
+| `Error::io(err: io::Error) -> Self` | Wraps a standard `io::Error`. |
+| `Error::path_not_found() -> Self` | Creates a `PathNotFound` error. |
+| `Error::watch_not_found() -> Self` | Creates a `WatchNotFound` error. |
+| `Error::invalid_config(config: &Config) -> Self` | Creates an `InvalidConfig` error. |
+
+### Path builder methods
+
+| Method | Description |
+|--------|-------------|
+| `add_path(path: PathBuf) -> Self` | Appends a path to `self.paths`. Returns `Self` for chaining. |
+| `set_paths(paths: Vec<PathBuf>) -> Self` | Replaces `self.paths`. Returns `Self` for chaining. |
+
+---
+
+## `ErrorKind` enum
+
+```rust
+pub enum ErrorKind {
+    Generic(String),
+    Io(io::Error),
+    PathNotFound,
+    WatchNotFound,
+    InvalidConfig(Config),
+    MaxFilesWatch,
+}
+```
+
+<ResponseField name="Generic(String)" type="ErrorKind">
+  An opaque error, typically a platform-specific message that does not map to a more specific variant. Match with `ErrorKind::Generic(ref msg)`.
+</ResponseField>
+
+<ResponseField name="Io(io::Error)" type="ErrorKind">
+  A wrapped standard library I/O error.
+</ResponseField>
+
+<ResponseField name="PathNotFound" type="ErrorKind">
+  The path passed to `watch` or `update_paths` does not exist or its metadata cannot be read. `error.paths` will contain the offending path when available.
+</ResponseField>
+
+<ResponseField name="WatchNotFound" type="ErrorKind">
+  `unwatch` was called for a path that is not currently being watched.
+</ResponseField>
+
+<ResponseField name="InvalidConfig(Config)" type="ErrorKind">
+  A `Config` value passed to `Watcher::configure` at runtime was rejected by the backend as invalid. The offending `Config` is embedded in the variant.
+</ResponseField>
+
+<ResponseField name="MaxFilesWatch" type="ErrorKind">
+  The inotify watch limit for the current user or system has been reached. Applies to `INotifyWatcher` on Linux / Android / FreeBSD 14.5+. Raise `fs.inotify.max_user_watches` via `sysctl`, or switch to `PollWatcher`.
+</ResponseField>
+
+### Matching on `ErrorKind`
+
+```rust
+use notify::{ErrorKind, Result, Watcher, RecursiveMode};
+use std::path::Path;
+
+fn watch(watcher: &mut impl Watcher, path: &Path) -> Result<()> {
+    match watcher.watch(path, RecursiveMode::Recursive) {
+        Ok(()) => Ok(()),
+        Err(e) => match e.kind {
+            ErrorKind::PathNotFound => {
+                eprintln!("path not found: {:?}", path);
+                Ok(()) // treat as non-fatal
+            }
+            ErrorKind::MaxFilesWatch => {
+                eprintln!("inotify watch limit reached");
+                Err(e)
+            }
+            _ => Err(e),
+        },
+    }
+}
+```
+
+---
+
+## `UpdatePathsError` struct
+
+`UpdatePathsError` is returned by `Watcher::update_paths` when one of the batch operations fails. It carries enough information to recover and retry the remaining operations.
+
+```rust
+pub struct UpdatePathsError {
+    pub source: Error,
+    pub origin: Option<PathOp>,
+    pub remaining: Vec<PathOp>,
+}
+```
+
+<ResponseField name="source" type="Error">
+  The underlying `notify::Error` that caused the batch to halt.
+</ResponseField>
+
+<ResponseField name="origin" type="Option<PathOp>">
+  The specific `PathOp` that failed, if known. All operations _before_ `origin` were applied successfully. `None` means the failure was not caused by a specific operation (e.g. the watcher failed to restart after applying all path changes).
+</ResponseField>
+
+<ResponseField name="remaining" type="Vec<PathOp>">
+  Operations that were not attempted. Does **not** include `origin`. To retry in order, handle `origin` first (if present), then process `remaining`.
+</ResponseField>
+
+`UpdatePathsError` implements:
+- `std::error::Error` (with `source()` returning `&self.source`)
+- `std::fmt::Display`
+- `From<UpdatePathsError> for Error` — lets you convert with `.into()` or `?`
+- `IntoIterator<Item = PathOp>` — iterates `origin` (if present) then `remaining`
+
+### Recovery pattern
+
+The standard pattern for tolerating partial failures in a path batch:
+
+```rust
+use notify::{PathOp, Watcher, NullWatcher};
+use std::path::PathBuf;
+
+let mut paths_to_add: Vec<PathOp> = vec![
+    PathOp::watch_recursive(PathBuf::from("/tmp/a")),
+    PathOp::watch_recursive(PathBuf::from("/tmp/nonexistent")),
+    PathOp::watch_recursive(PathBuf::from("/tmp/b")),
+];
+
+let mut watcher = NullWatcher; // replace with your real watcher
+
+// Keep retrying with the remaining operations after each failure.
+while !paths_to_add.is_empty() {
+    if let Err(e) = watcher.update_paths(std::mem::take(&mut paths_to_add)) {
+        eprintln!("failed to apply {:?}: {}", e.origin, e.source);
+        // origin has already been skipped; put remaining back for the next iteration
+        paths_to_add = e.remaining;
+    }
+}
+```
+
+<Note>
+The loop skips `origin` (the failing operation) and retries only `remaining`. If `origin` contains a path you want to handle, inspect `e.origin` before reassigning `paths_to_add`.
+</Note>
+
+### Converting to `Error`
+
+```rust
+fn apply(watcher: &mut impl notify::Watcher, ops: Vec<notify::PathOp>) -> notify::Result<()> {
+    // UpdatePathsError converts into Error via From
+    watcher.update_paths(ops).map_err(Into::into)
+}
+```
+
+### Iterating over failed + remaining ops
+
+```rust
+if let Err(e) = watcher.update_paths(batch) {
+    // Iterate over origin (if any) followed by remaining
+    for op in e {
+        eprintln!("unapplied op: {:?}", op.as_path());
+    }
+}
+```
+
+---
+
+## Conversions from standard types
+
+`Error` implements `From` for several standard error types, so the `?` operator works in contexts that produce those errors:
+
+| From | Into |
+|------|------|
+| `io::Error` | `Error` (wraps as `ErrorKind::Io`) |
+| `std::sync::mpsc::SendError<T>` | `Error` (wraps as `ErrorKind::Generic`) |
+| `std::sync::mpsc::RecvError` | `Error` (wraps as `ErrorKind::Generic`) |
+| `std::sync::PoisonError<T>` | `Error` (wraps as `ErrorKind::Generic`) |

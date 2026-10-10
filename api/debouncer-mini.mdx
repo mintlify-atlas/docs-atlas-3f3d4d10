@@ -1,0 +1,319 @@
+---
+title: "notify-debouncer-mini API Reference"
+sidebarTitle: "debouncer-mini"
+description: "Full API reference for notify-debouncer-mini: new_debouncer(), Debouncer, Config, DebounceEventHandler, DebouncedEvent, and DebouncedEventKind."
+---
+
+`notify-debouncer-mini` is a lightweight debouncing layer on top of [notify](https://docs.rs/notify). It filters the raw stream of file-system events and emits at most **one event per file per timeout window**, dramatically reducing noise from editors and build tools that touch the same file many times in quick succession.
+
+## Installation
+
+Add the crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+notify-debouncer-mini = "0.6.0"
+```
+
+If you need to enable specific notify backend features, declare `notify` explicitly alongside the debouncer:
+
+```toml
+[dependencies]
+notify-debouncer-mini = "0.6.0"
+notify = { version = "...", features = ["..."] }
+```
+
+<Note>
+  The crate re-exports `notify` as `notify_debouncer_mini::notify`, so you can import it from a single dependency if you don't need feature customisation.
+</Note>
+
+## Quick Start
+
+```rust
+use std::path::Path;
+use std::time::Duration;
+use notify_debouncer_mini::{notify::*, new_debouncer, DebounceEventResult};
+
+let mut debouncer = new_debouncer(Duration::from_secs(2), |res: DebounceEventResult| {
+    match res {
+        Ok(events) => events.iter().for_each(|e| println!("Event {:?} for {:?}", e.kind, e.path)),
+        Err(e) => println!("Error {:?}", e),
+    }
+}).unwrap();
+
+// Watch a directory tree recursively.
+debouncer.watcher().watch(Path::new("."), RecursiveMode::Recursive).unwrap();
+
+// Dropping `debouncer` here stops the background thread automatically.
+```
+
+---
+
+## Functions
+
+### `new_debouncer`
+
+```rust
+pub fn new_debouncer<F: DebounceEventHandler>(
+    timeout: Duration,
+    event_handler: F,
+) -> Result<Debouncer<RecommendedWatcher>, Error>
+```
+
+Creates a debounced watcher backed by `RecommendedWatcher` — notify's platform-appropriate default backend. The debouncer starts a background thread immediately and begins forwarding events to `event_handler` once the quiet period expires.
+
+<ParamField path="timeout" type="Duration" required>
+  The quiet period. A debounced event is emitted for a given path once no new raw events have arrived for this duration. For continuously-updating paths an `AnyContinuous` event is emitted every `timeout`, even while activity persists.
+</ParamField>
+
+<ParamField path="event_handler" type="F: DebounceEventHandler" required>
+  A callback, channel sender, or any type implementing [`DebounceEventHandler`](#debounceeventhandler). Invoked from the debouncer's background thread.
+</ParamField>
+
+Returns `Ok(Debouncer<RecommendedWatcher>)` on success, or a `notify::Error` if the watcher or background thread could not be created.
+
+---
+
+### `new_debouncer_opt`
+
+```rust
+pub fn new_debouncer_opt<F: DebounceEventHandler, T: Watcher>(
+    config: Config,
+    event_handler: F,
+) -> Result<Debouncer<T>, Error>
+```
+
+Lower-level constructor that accepts a full [`Config`](#config) and lets you choose the watcher backend type `T` (any type implementing `notify::Watcher`). Prefer `new_debouncer` unless you need a custom backend or fine-grained configuration.
+
+<ParamField path="config" type="Config" required>
+  Debouncer configuration including timeout, batch mode, and the underlying `notify::Config`.
+</ParamField>
+
+<ParamField path="event_handler" type="F: DebounceEventHandler" required>
+  Event handler invoked by the background thread.
+</ParamField>
+
+---
+
+## Types
+
+### `DebounceEventResult`
+
+```rust
+pub type DebounceEventResult = Result<Vec<DebouncedEvent>, Error>;
+```
+
+The value delivered to your event handler on every tick. On success it carries a non-empty batch of [`DebouncedEvent`](#debounceevent)s. On failure it carries the underlying `notify::Error` that was reported by the watcher backend.
+
+---
+
+### `DebouncedEvent`
+
+A debounced event for a single filesystem path. Unlike the richer `notify::Event`, this struct deliberately omits the raw event kind — it only tells you *that* something happened, not *what* happened.
+
+```rust
+pub struct DebouncedEvent {
+    pub path: PathBuf,
+    pub kind: DebouncedEventKind,
+}
+```
+
+<ResponseField name="path" type="PathBuf">
+  Absolute path of the file or directory that changed.
+</ResponseField>
+
+<ResponseField name="kind" type="DebouncedEventKind">
+  Whether the event has settled ([`Any`](#debouncedEventKind-any)) or is ongoing ([`AnyContinuous`](#debouncedEventKind-anycontinuous)).
+</ResponseField>
+
+#### Constructor
+
+```rust
+pub fn new(path: PathBuf, kind: DebouncedEventKind) -> Self
+```
+
+---
+
+### `DebouncedEventKind`
+
+```rust
+#[non_exhaustive]
+pub enum DebouncedEventKind {
+    Any,
+    AnyContinuous,
+}
+```
+
+<ResponseField name="Any" type="variant">
+  The path was modified and activity has now stopped for at least one timeout period. This is the most common variant.
+</ResponseField>
+
+<ResponseField name="AnyContinuous" type="variant">
+  Activity on the path has been ongoing for at least one full timeout period with no quiet window. The debouncer keeps emitting this variant every `timeout` until writes stop, at which point it switches to `Any`.
+</ResponseField>
+
+<Note>
+  `DebouncedEventKind` is `#[non_exhaustive]` — match arms should include a wildcard to be forward-compatible.
+</Note>
+
+---
+
+### `Debouncer<T>`
+
+```rust
+pub struct Debouncer<T: Watcher> { /* private fields */ }
+```
+
+An owned guard returned by `new_debouncer` or `new_debouncer_opt`. Dropping the `Debouncer` sends a shutdown signal to the background thread and stops all watching.
+
+#### Methods
+
+```rust
+pub fn watcher(&mut self) -> &mut dyn Watcher
+```
+
+Returns a mutable reference to the underlying `notify::Watcher`. Use this to call `watch()` and `unwatch()` on specific paths.
+
+```rust
+debouncer.watcher().watch(Path::new("/tmp/logs"), RecursiveMode::Recursive)?;
+debouncer.watcher().unwatch(Path::new("/tmp/logs"))?;
+```
+
+<Warning>
+  `Debouncer` does not provide a `stop_nonblocking` method — the only way to stop it is to drop it. The background thread is joined when the `Debouncer` is dropped.
+</Warning>
+
+---
+
+### `DebounceEventHandler`
+
+```rust
+pub trait DebounceEventHandler: Send + 'static {
+    fn handle_event(&mut self, event: DebounceEventResult);
+}
+```
+
+The trait that all event consumers must implement. It is automatically satisfied by:
+
+| Type | Behaviour |
+|------|-----------|
+| `FnMut(DebounceEventResult)` | Closure — called directly |
+| `std::sync::mpsc::Sender<DebounceEventResult>` | Sends on the standard MPSC channel |
+| `crossbeam_channel::Sender<DebounceEventResult>` | Requires `crossbeam-channel` feature |
+| `flume::Sender<DebounceEventResult>` | Requires `flume` feature |
+| `futures::channel::mpsc::UnboundedSender<DebounceEventResult>` | Requires `futures` feature |
+| `tokio::sync::mpsc::UnboundedSender<DebounceEventResult>` | Requires `tokio` feature |
+
+#### Custom implementation example
+
+```rust
+use notify_debouncer_mini::{DebounceEventHandler, DebounceEventResult};
+
+struct EventPrinter;
+
+impl DebounceEventHandler for EventPrinter {
+    fn handle_event(&mut self, event: DebounceEventResult) {
+        match event {
+            Ok(events) => {
+                for e in events {
+                    println!("Event {:?} for path {:?}", e.kind, e.path);
+                }
+            }
+            Err(error) => println!("Got error {:?}", error),
+        }
+    }
+}
+```
+
+---
+
+### `Config`
+
+```rust
+pub struct Config {
+    timeout: Duration,       // default: 500 ms
+    batch_mode: bool,        // default: true
+    notify_config: notify::Config,
+}
+```
+
+Builder-style configuration for [`new_debouncer_opt`](#new_debouncer_opt).
+
+```rust
+use std::time::Duration;
+use notify_debouncer_mini::Config;
+
+let config = Config::default()
+    .with_timeout(Duration::from_secs(1))
+    .with_batch_mode(true)
+    .with_notify_config(notify::Config::default());
+```
+
+#### `Config::default()`
+
+Returns a `Config` with:
+- `timeout` = 500 ms
+- `batch_mode` = `true`
+- `notify_config` = `notify::Config::default()`
+
+#### Methods
+
+<ResponseField name="with_timeout(timeout: Duration) -> Self" type="builder">
+  Set the debounce timeout. After this quiet period with no new events for a path, a `DebouncedEventKind::Any` event is emitted.
+</ResponseField>
+
+<ResponseField name="with_batch_mode(batch_mode: bool) -> Self" type="builder">
+  When `true` (default), events may be held up to **2× the timeout** so they can be batched together with other events that expire around the same time. Disable this for lowest possible latency.
+</ResponseField>
+
+<ResponseField name="with_notify_config(notify_config: notify::Config) -> Self" type="builder">
+  Pass a custom `notify::Config` to the underlying watcher backend.
+</ResponseField>
+
+<ResponseField name="timeout() -> Duration" type="getter">
+  Returns the configured timeout.
+</ResponseField>
+
+<ResponseField name="batch_mode() -> bool" type="getter">
+  Returns whether batch mode is enabled.
+</ResponseField>
+
+<ResponseField name="notify_config() -> &notify::Config" type="getter">
+  Returns a reference to the underlying notify configuration.
+</ResponseField>
+
+---
+
+## Re-exports
+
+```rust
+pub use notify;
+```
+
+The full `notify` crate is re-exported so downstream users can access `RecursiveMode`, `RecommendedWatcher`, and other types without adding a separate `notify` dependency.
+
+---
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `macos_fsevent` | ✅ | Enables notify's FSEvents backend on macOS |
+| `macos_kqueue` | | Enables notify's kqueue backend on macOS |
+| `freebsd_inotify` | | Enables notify's inotify backend on FreeBSD 14.5+ (needed for cross-compilation only) |
+| `serde` | | Enables serialization support for `DebouncedEvent` and `DebouncedEventKind` via `notify-types` |
+| `crossbeam-channel` | | Implements `DebounceEventHandler` for `crossbeam_channel::Sender` |
+| `flume` | | Implements `DebounceEventHandler` for `flume::Sender` |
+| `futures` | | Implements `DebounceEventHandler` for `futures::channel::mpsc::UnboundedSender` |
+| `tokio` | | Implements `DebounceEventHandler` for `tokio::sync::mpsc::UnboundedSender` |
+| `serialization-compat-6` | | Restores notify 6 serialization behaviour |
+
+<Tip>
+  If you only need a channel-based handler, prefer `std::sync::mpsc::Sender` — it requires no extra feature flags and is implemented unconditionally.
+</Tip>
+
+---
+
+## Caveats
+
+All events originate from `notify`, so the [known problems](https://docs.rs/notify/latest/notify/#known-problems) section of the notify documentation applies here as well. In particular, the debouncer cannot make up for events that the OS kernel chose not to deliver.

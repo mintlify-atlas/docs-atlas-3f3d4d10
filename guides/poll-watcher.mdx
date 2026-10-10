@@ -1,0 +1,196 @@
+---
+title: "Using PollWatcher for Network Mounts and Pseudo Filesystems"
+sidebarTitle: "Poll Watcher"
+description: "Configure PollWatcher to watch network filesystems, /proc, /sys, and Docker containers where native OS watchers don't emit events."
+---
+
+Native OS watchers like inotify, FSEvents, and ReadDirectoryChangesWatcher work by subscribing to kernel-level change notifications. When the filesystem you want to watch doesn't produce those notifications — network mounts, virtual files in `/proc` and `/sys`, or emulated environments — the recommended watcher will silently miss every change. `PollWatcher` solves this by periodically scanning the watched paths and comparing state, using only Rust's standard library APIs. It works anywhere, at the cost of higher CPU and I/O usage proportional to the number of files watched and the polling interval.
+
+<Tip>
+  Always try `RecommendedWatcher` first. Fall back to `PollWatcher` only when the native backend is unavailable or unreliable for your specific filesystem.
+</Tip>
+
+## When to Use `PollWatcher`
+
+| Scenario | Why native backends fail |
+|---|---|
+| **NFS / SSHFS / network mounts** | The remote server doesn't relay kernel events to the client |
+| **WSL programs watching Windows paths** | `ReadDirectoryChangesW` paths are not reachable from inside the WSL guest ([issue #254](https://github.com/notify-rs/notify/issues/254)) |
+| **Docker on macOS M1** | The emulation layer throws `Function not implemented (os error 38)` ([issue #423](https://github.com/notify-rs/notify/issues/423)) |
+| **`/proc` and `/sys` on Linux** | These pseudo-filesystems don't emit change notifications and may not update `mtime` correctly |
+| **macOS FSEvents + unowned files** | FSEvents' security model prevents watching files you don't own |
+| **Any environment without a native backend** | `PollWatcher` is the universal fallback |
+
+---
+
+## Automatic Polling
+
+The most common setup: `PollWatcher` rescans watched paths on a fixed interval and emits events for any entries that have appeared, disappeared, or changed `mtime` since the last scan.
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(5));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = PollWatcher::new(tx, config)?;
+
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("changed: {:?}", event),
+            Err(e)    => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+The default poll interval is **30 seconds**. Pass `with_poll_interval` to override it. An initial scan runs immediately when `watch()` is called; subsequent scans happen after each interval elapses.
+
+<Note>
+  Polling is expensive for large directory trees. Each scan reads metadata (and optionally content) for every file. Tune `with_poll_interval` to balance responsiveness against CPU and I/O load — coarser intervals for large trees, finer intervals for small ones.
+</Note>
+
+---
+
+## Content Comparison for Pseudo-Filesystems
+
+Files under `/proc` and `/sys` often report a constant `mtime` or always show a size of zero, even when their content changes. Polling by metadata alone will never detect these changes. Enable `with_compare_contents(true)` to hash file content at each scan and emit an event whenever the hash changes:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+fn main() -> notify::Result<()> {
+    // Crucial for pseudo-filesystems: detect changes by hashing content
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(2))
+        .with_compare_contents(true);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = PollWatcher::new(tx, config)?;
+
+    // Watch a sysfs path — useful for monitoring network interface stats,
+    // power supply status, hardware sensors, etc.
+    watcher.watch(
+        Path::new("/sys/class/net/lo/statistics/tx_bytes"),
+        RecursiveMode::NonRecursive,
+    )?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("changed: {:?}", event),
+            Err(e)    => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+<Warning>
+  `with_compare_contents(true)` reads and hashes **every watched file** on each scan. For directories with many files this can be very expensive. Scope your watch path as narrowly as possible when using this option.
+</Warning>
+
+---
+
+## Manual Polling Mode
+
+In some situations you control exactly when checks happen — for example, after a network request completes, or on a user interaction. Disable the automatic polling timer with `with_manual_polling()` and call `watcher.poll()` on demand:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // Disable automatic scanning
+    let config = Config::default().with_manual_polling();
+    let mut watcher = PollWatcher::new(tx, config)?;
+
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    // Run event receiver on a separate thread
+    std::thread::spawn(move || {
+        for res in rx {
+            match res {
+                Ok(event) => println!("changed: {:?}", event),
+                Err(e)    => println!("watch error: {:?}", e),
+            }
+        }
+    });
+
+    // Poll on demand — e.g. each time the user presses Enter
+    loop {
+        println!("Press Enter to poll for changes");
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        watcher.poll()?;
+    }
+}
+```
+
+`watcher.poll()` sends a message to the poll thread and returns immediately; events arrive asynchronously on the channel. If you need to wait for the scan to complete before continuing, use `poll_blocking()` instead:
+
+```rust
+// Block until the full scan cycle has finished
+watcher.poll_blocking()?;
+```
+
+---
+
+## Receiving Initial Scan Events
+
+When `PollWatcher` first watches a path, it performs an initial scan to build its baseline. You can receive a callback for every file discovered during that scan using `PollWatcher::with_initial_scan`:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher, poll::ScanEvent};
+use std::path::Path;
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    enum Message {
+        Event(notify::Result<notify::Event>),
+        Scan(ScanEvent),
+    }
+
+    let tx_c = tx.clone();
+    let mut watcher = PollWatcher::with_initial_scan(
+        move |watch_event| {
+            tx_c.send(Message::Event(watch_event)).unwrap();
+        },
+        Config::default(),
+        move |scan_event| {
+            tx.send(Message::Scan(scan_event)).unwrap();
+        },
+    )?;
+
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Message::Event(e) => println!("Watch event: {:?}", e),
+            Message::Scan(e)  => println!("Scan event: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## Performance Considerations
+
+- **Polling is O(files × scans/second).** A directory with 10 000 files polled every second performs 10 000 `stat` calls per second. Tune the interval accordingly.
+- **`with_compare_contents` multiplies cost.** Each file must be opened and fully read. Use it only for pseudo-filesystems where you genuinely cannot rely on `mtime`.
+- **`PollWatcher` is not subject to inotify watch limits.** On Linux, the native inotify backend is limited by `fs.inotify.max_user_watches` (see [Known Issues](/guides/known-issues)). `PollWatcher` bypasses that limit entirely.
+- **Prefer `RecursiveMode::NonRecursive` where possible.** If you only need to observe a single directory (not its subdirectories), non-recursive mode reduces the walk to a single level.

@@ -1,72 +1,96 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Notify",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#0066cc",
+    "light": "#097efc",
+    "dark": "#70b4fc"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/a85500e9-80c0-4a7b-8a40-207ece6bd792.svg",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/notify-rs/notify"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/notify-rs/notify"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/watchers",
+              "concepts/events",
+              "concepts/configuration",
+              "concepts/backends"
+            ]
+          },
+          {
+            "group": "Debouncing",
+            "pages": [
+              "debouncing/overview",
+              "debouncing/debouncer-mini",
+              "debouncing/debouncer-full"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/async",
+              "guides/event-filtering",
+              "guides/poll-watcher",
+              "guides/known-issues"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": [
+              "migration/v8-to-v9",
+              "migration/v4-to-v5"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "notify",
+            "pages": [
+              "api/watcher-trait",
+              "api/recommended-watcher",
+              "api/poll-watcher",
+              "api/config",
+              "api/events",
+              "api/errors"
+            ]
+          },
+          {
+            "group": "Crates",
+            "pages": [
+              "api/debouncer-mini",
+              "api/debouncer-full",
+              "api/file-id"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,187 @@
+---
+title: "Migrate from notify v8 to v9"
+sidebarTitle: "v8 → v9"
+description: "Upgrade guide for notify v8 to v9: replace paths_mut with update_paths(), understand new path representation semantics, and learn about event-kind filtering."
+---
+
+notify v9 ships a focused set of breaking changes that clean up the batch-watch API, nail down path-representation semantics, and unify how repeated `watch` calls behave. Most codebases only need to update the batch-watch call sites and verify that any relative watch paths are intentional. The sections below walk through each change with before-and-after examples.
+
+<Warning>
+  The changes listed under **Breaking changes** require code updates before upgrading to v9. Non-breaking additions are described at the bottom of this page and require no action unless you want the new functionality.
+</Warning>
+
+## Breaking changes
+
+### MSRV bump to Rust 1.88
+
+notify v9 requires **Rust 1.88** or newer. Update your toolchain before upgrading the dependency:
+
+```toml
+[dependencies]
+notify = "9"
+```
+
+A new MSRV policy accompanies this change — consult the notify README for the full policy statement.
+
+---
+
+### `Watcher::paths_mut` removed
+
+`PathsMut` and `Watcher::paths_mut()` are gone in v9. Their replacement is a single method, `Watcher::update_paths(Vec<PathOp>)`, together with two supporting types:
+
+- **`PathOp`** — represents a single watch or unwatch operation.
+- **`WatchPathConfig`** — carries per-path settings (recursive mode, symlink behaviour, etc.).
+- **`UpdatePathsError`** — reports partial failures when a batch cannot be completed.
+
+<Tabs>
+  <Tab title="v8">
+    ```rust
+    use notify::{RecursiveMode, Result, Watcher};
+
+    fn add_many_paths<W: Watcher>(watcher: &mut W, paths: &[std::path::PathBuf]) -> Result<()> {
+        let mut batch = watcher.paths_mut();
+        for path in paths {
+            batch.add(path, RecursiveMode::Recursive)?;
+        }
+        batch.commit()
+    }
+    ```
+  </Tab>
+  <Tab title="v9">
+    ```rust
+    use notify::{PathOp, Result, Watcher};
+
+    fn add_many_paths<W: Watcher>(watcher: &mut W, paths: &[std::path::PathBuf]) -> Result<()> {
+        let ops = paths
+            .iter()
+            .cloned()
+            .map(PathOp::watch_recursive)
+            .collect::<Vec<_>>();
+
+        watcher.update_paths(ops).map_err(notify::Error::from)?;
+        Ok(())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+`update_paths` applies operations in order and stops on the first error. When it fails, `UpdatePathsError` carries three fields you can use to decide how to recover:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `source` | `notify::Error` | The underlying error that caused the failure. |
+| `origin` | `Option<PathOp>` | The operation that failed, if it could be identified. |
+| `remaining` | `Vec<PathOp>` | Operations that were not attempted because processing stopped early. |
+
+#### Retry pattern using `remaining`
+
+Because `remaining` gives you back the un-attempted operations, you can place `update_paths` in a loop and retry only what was not processed:
+
+```rust
+use notify::{PathOp, Watcher};
+
+let mut paths_to_add = vec![
+    PathOp::watch_recursive(existing_dir_1.clone()),
+    PathOp::watch_recursive(not_existent_file.clone()),
+    PathOp::watch_recursive(existing_dir_2.clone()),
+];
+
+while !paths_to_add.is_empty() {
+    if let Err(e) = watcher.update_paths(std::mem::take(&mut paths_to_add)) {
+        // `e.remaining` does NOT include `e.origin`; decide here whether
+        // to skip the failed path or push it back for another attempt.
+        paths_to_add = e.remaining;
+    }
+}
+```
+
+<Note>
+  If you implemented a custom `Watcher` and overrode `paths_mut`, migrate that logic to `update_paths`. The default trait implementation delegates each `PathOp` to `watch_with` or `unwatch` in order.
+</Note>
+
+---
+
+### Event paths preserve the watched path representation
+
+`Event.paths` and `Watcher::watched_paths()` now use the **same root representation** that was passed to `Watcher::watch` or `Watcher::update_paths`. Watching a relative path produces relative event paths; watching an absolute path produces absolute event paths.
+
+| Watch call | Reported event path (example) |
+|---|---|
+| `watcher.watch(Path::new("src"), ...)` | `src/lib.rs` |
+| `watcher.watch(Path::new("/repo/src"), ...)` | `/repo/src/lib.rs` |
+
+In v8, the Linux and Windows backends silently converted relative watch roots to absolute event paths. Code that relied on that implicit conversion must now canonicalise the path before calling `watch`:
+
+```rust
+// v9: convert to absolute before watching if you need absolute event paths
+let path = std::env::current_dir()?.join("src");
+watcher.watch(&path, notify::RecursiveMode::Recursive)?;
+```
+
+<Warning>
+  If your event-processing code checks `event.paths` against absolute filesystem paths, make sure you pass an absolute path to `watch`. Passing a relative path and then comparing events against absolute paths will silently produce no matches.
+</Warning>
+
+---
+
+### Rewatching the same path replaces the existing watch
+
+Calling `Watcher::watch` a second time for the same backend-resolved path now **replaces** the existing watch on all backends. The recursive mode is updated to the new value, no second independent watch is added, and a single `Watcher::unwatch` call is sufficient to remove the path.
+
+In v8, this behaviour varied by backend: some backends merged repeated watches, others kept duplicate backend entries or leaked resources.
+
+<Tabs>
+  <Tab title="v8 (behaviour varied by backend)">
+    ```rust
+    // After these two calls some backends kept two entries, others merged them.
+    // A single unwatch() might not have removed both.
+    watcher.watch(path, notify::RecursiveMode::Recursive)?;
+    watcher.watch(path, notify::RecursiveMode::NonRecursive)?;
+    ```
+  </Tab>
+  <Tab title="v9 (deterministic replacement)">
+    ```rust
+    watcher.watch(path, notify::RecursiveMode::Recursive)?;
+    // This call replaces the recursive watch with a non-recursive one.
+    watcher.watch(path, notify::RecursiveMode::NonRecursive)?;
+
+    // `path` is now watched non-recursively.
+    // One unwatch() call is always sufficient.
+    watcher.unwatch(path)?;
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  If your code intentionally registered the same path twice to track it through two independent logical watches, use separate `Watcher` instances or manage parent/child watches explicitly.
+</Note>
+
+---
+
+## Non-breaking additions
+
+These features were introduced in v9 alongside the breaking changes. No migration is required — they are opt-in.
+
+### Event-kind filtering: `Config::with_event_kinds` and `EventKindMask`
+
+You can now tell a watcher to deliver only certain categories of events. Pass an `EventKindMask` to `Config::with_event_kinds`:
+
+```rust
+use notify::{Config, EventKindMask};
+
+// Only receive core create/modify/remove events; suppress access and other events.
+let config = Config::default().with_event_kinds(EventKindMask::CORE);
+let mut watcher = notify::RecommendedWatcher::new(event_handler, config)?;
+```
+
+<Tip>
+  Filtering at the watcher level reduces handler call overhead on busy directories. For example, excluding `EventKindMask::MODIFY_META` avoids spurious events that `std::fs::copy` on macOS APFS can trigger on the source file.
+</Tip>
+
+### macOS FSEvents backend now uses `objc2` crates
+
+The `macos_fsevent` feature now links against `objc2-core-foundation` and `objc2-core-services` instead of the older `fsevent-sys` crate. The public `notify` API is unchanged, but the underlying Objective-C bridge is different.
+
+<Warning>
+  Re-run your macOS integration tests after upgrading to confirm that FSEvents behaviour is unaffected in your environment. The new bridge has fixed several edge-case panics and path-handling bugs, so existing tests may actually become more reliable.
+</Warning>

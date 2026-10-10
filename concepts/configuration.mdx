@@ -1,0 +1,226 @@
+---
+title: "Configuring Notify Watchers and Backends"
+sidebarTitle: "Configuration"
+description: "Reference for the Config struct: poll interval, content comparison, symlink following, event kind filtering, FSEvents latency, and Windows path separator settings."
+---
+
+Notify's `Config` struct is the single place to tune watcher behaviour at construction time. It uses a builder pattern — every setter returns a new `Config` value so chains can be written inline — and all fields implement `Copy`, making the struct cheap to pass around. Some options can also be applied to a running watcher via `Watcher::configure`.
+
+## `Config::default()` Values
+
+| Field | Default | Changeable at runtime? |
+|---|---|---|
+| `poll_interval` | `Some(30 seconds)` | No — recreate watcher |
+| `compare_contents` | `false` | No — recreate watcher |
+| `follow_symlinks` | `true` | No — recreate watcher |
+| `event_kinds` | `EventKindMask::ALL` | No — recreate watcher |
+| `fsevent_latency` | `Duration::ZERO` | No — recreate watcher |
+| `windows_path_separator_style` | `WindowsPathSeparatorStyle::Auto` | No — recreate watcher |
+
+## Builder Methods
+
+### `with_poll_interval(Duration)`
+
+*Applies to: `PollWatcher`.*
+
+Sets the interval between automatic re-scan passes. Calling this method enables automatic polling — if you had previously called `with_manual_polling()`, this overrides it.
+
+```rust
+use notify::Config;
+use std::time::Duration;
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(5));
+```
+
+The default is 30 seconds. For large directory trees, measure the scan time before tuning this value; scanning many files can be expensive.
+
+### `with_manual_polling()`
+
+*Applies to: `PollWatcher`.*
+
+Disables automatic polling. With this option set, the `PollWatcher` will not scan on its own — you must trigger each scan by calling `PollWatcher::poll()` or `PollWatcher::poll_blocking()` manually. Calling `with_poll_interval` afterwards re-enables automatic polling.
+
+```rust
+use notify::Config;
+
+let config = Config::default().with_manual_polling();
+```
+
+Manual polling is useful in test suites (scan exactly when you need to), in applications where you want event-driven polling (scan on an external signal), or in environments where background thread overhead matters.
+
+### `with_compare_contents(bool)`
+
+*Applies to: `PollWatcher`.*
+
+When `true`, the poll watcher hashes file contents using xxHash3 at each scan interval and reports a data-change event when the hash differs from the previous scan, even if the modification timestamp has not changed. Off by default.
+
+```rust
+use notify::Config;
+use std::time::Duration;
+
+let config = Config::default()
+    .with_compare_contents(true)
+    .with_poll_interval(Duration::from_secs(2));
+```
+
+<Warning>
+  Content comparison reads every watched file on every poll cycle. On large
+  trees this can be very expensive. Enable it only when you need it — primarily
+  for pseudo-filesystems like `/proc` and `/sys` on Linux that do not update
+  modification timestamps reliably.
+</Warning>
+
+### `with_follow_symlinks(bool)`
+
+*Applies to: `INotifyWatcher`, `KqueueWatcher`, `PollWatcher`.*
+
+When `true` (the default), the watcher follows symbolic links when recursively descending watched directories. Set to `false` to watch symlink entries as files rather than following them to their targets.
+
+```rust
+use notify::Config;
+
+let config = Config::default().with_follow_symlinks(false);
+```
+
+### `with_event_kinds(EventKindMask)`
+
+*Applies to: all backends.*
+
+Filters which event kinds are delivered to the event handler. On inotify (Linux), the mask is translated to native kernel flags so unneeded events are suppressed at the kernel level. On all other backends, filtering happens in userspace.
+
+```rust
+use notify::{Config, EventKindMask};
+
+// Receive only create, remove, and all modify events — no access events
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CORE);
+
+// Receive only file creation and deletion
+let config_narrow = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+```
+
+The default is `EventKindMask::ALL`. See the [Events](/concepts/events) page for the full mask reference.
+
+### `with_fsevent_latency(Duration)`
+
+*Applies to: `FsEventWatcher` (macOS).*
+
+The latency value passed to `FSEventStreamCreate`. It controls how long the FSEvents service waits after hearing about a kernel event before invoking the callback. A larger value lets the system coalesce bursts of changes into fewer callbacks at the cost of higher latency.
+
+```rust
+use notify::Config;
+use std::time::Duration;
+
+// Coalesce events over a 250 ms window
+let config = Config::default()
+    .with_fsevent_latency(Duration::from_millis(250));
+```
+
+The default is `Duration::ZERO`. Because notify uses `kFSEventStreamCreateFlagNoDefer`, the first event in an idle period is always delivered immediately; only subsequent events within the latency window are coalesced.
+
+### `with_windows_path_separator_style(WindowsPathSeparatorStyle)`
+
+*Applies to: `ReadDirectoryChangesWatcher` (Windows).*
+
+Controls the path separator character used in emitted event paths on Windows. The three variants mirror the `WindowsPathSeparatorStyle` enum:
+
+| Variant | Behaviour |
+|---|---|
+| `Auto` *(default)* | Infers the separator from the watched input path. Watching `C:/tmp` yields `/`; watching `C:\tmp` yields `\`. |
+| `Slash` | Always use forward slashes `/`. |
+| `Backslash` | Always use backslashes `\`. |
+
+```rust
+use notify::{Config, WindowsPathSeparatorStyle};
+
+let config = Config::default()
+    .with_windows_path_separator_style(WindowsPathSeparatorStyle::Slash);
+```
+
+This setting has no effect on non-Windows platforms.
+
+## Full Construction Example
+
+```rust
+use notify::{Config, EventKindMask, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(5))
+        .with_compare_contents(true)
+        .with_event_kinds(EventKindMask::CORE);
+
+    let mut watcher = PollWatcher::new(
+        |res| println!("{res:?}"),
+        config,
+    )?;
+
+    watcher.watch(Path::new("/proc/self"), RecursiveMode::NonRecursive)?;
+    Ok(())
+}
+```
+
+## Runtime Reconfiguration via `configure()`
+
+After construction, you can pass a new `Config` to `Watcher::configure`. Returns `Ok(true)` if the backend accepts the change, `Ok(false)` if it does not support runtime reconfiguration, and `Err(notify::Error)` on failure.
+
+```rust
+use notify::{Config, Watcher};
+use std::time::Duration;
+
+// Slow down polling at runtime
+let relaxed = Config::default()
+    .with_poll_interval(Duration::from_secs(60));
+
+match watcher.configure(relaxed)? {
+    true  => println!("poll interval updated"),
+    false => println!("this backend does not support runtime reconfiguration"),
+}
+```
+
+<Note>
+  Most backend-specific settings (compare contents, follow symlinks, event
+  kinds, FSEvents latency, Windows separator style) cannot be changed after the
+  watcher is created. If you need to change them, drop the watcher and construct
+  a new one.
+</Note>
+
+## Per-Path Settings with `WatchPathConfig`
+
+`WatchPathConfig` holds settings that apply to a single watched path, passed through `Watcher::watch_with`.
+
+```rust
+use notify::{RecursiveMode, WatchPathConfig, Watcher};
+use std::path::Path;
+
+// Watch a symlink without following it (INotifyWatcher only)
+let path_config = WatchPathConfig::new(RecursiveMode::NonRecursive)
+    .with_dereference_symlinks(false);
+
+watcher.watch_with(Path::new("/data/link"), path_config)?;
+```
+
+| Method | Default | Applies to |
+|---|---|---|
+| `new(RecursiveMode)` | — | All backends |
+| `with_recursive_mode(RecursiveMode)` | `RecursiveMode::Recursive` | All backends |
+| `with_dereference_symlinks(bool)` | `true` | INotifyWatcher, NonRecursive watches |
+
+Backends that do not implement a particular option silently ignore it and fall back to the `watch(path, recursive_mode)` behaviour.
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="Events" href="/concepts/events">
+    EventKindMask reference and all event subtypes.
+  </Card>
+  <Card title="Watchers" href="/concepts/watchers">
+    How to construct and use the Watcher trait.
+  </Card>
+  <Card title="Backends" href="/concepts/backends">
+    Which Config options each backend respects.
+  </Card>
+</CardGroup>

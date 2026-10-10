@@ -1,0 +1,431 @@
+---
+title: "Config — Watcher Backend Configuration"
+sidebarTitle: "Config"
+description: "Reference for notify::Config: poll interval, content comparison, symlink following, EventKindMask, FSEvents latency, Windows path separator, and WatchPathConfig."
+---
+
+`Config` is the primary way to customise watcher behaviour at construction time, and for some backends at runtime via `Watcher::configure`. It is a plain value type — `Copy + Clone + Debug + Hash + Eq` — and uses a builder pattern where every setter returns a new `Self`.
+
+```rust
+use notify::{Config, EventKindMask};
+use std::time::Duration;
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(2))
+    .with_compare_contents(true)
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+```
+
+<Note>
+Options marked **construction-time only** must be set before the watcher is created. Passing them to `Watcher::configure` on a running watcher returns `Ok(false)` or is silently ignored.
+</Note>
+
+---
+
+## Default values
+
+| Field | Default |
+|-------|---------|
+| `poll_interval` | `Some(Duration::from_secs(30))` |
+| `compare_contents` | `false` |
+| `follow_symlinks` | `true` |
+| `event_kinds` | `EventKindMask::ALL` |
+| `windows_path_separator_style` | `WindowsPathSeparatorStyle::Auto` |
+| `fsevent_latency` | `Duration::ZERO` |
+
+---
+
+## Poll interval
+
+### `with_poll_interval`
+
+```rust
+pub fn with_poll_interval(self, dur: Duration) -> Self
+```
+
+Sets how long `PollWatcher` sleeps between automatic background scans. Calling this also re-enables automatic polling if `with_manual_polling` was called previously.
+
+<ParamField path="dur" type="Duration">
+  Interval between scans. Shorter intervals detect changes faster at the cost of more I/O. The default is 30 seconds.
+</ParamField>
+
+**Applies to:** `PollWatcher` only. Ignored by all other backends.
+
+---
+
+### `poll_interval`
+
+```rust
+pub fn poll_interval(&self) -> Option<Duration>
+```
+
+Returns the current poll interval, or `None` if manual polling is enabled.
+
+---
+
+### `with_manual_polling`
+
+```rust
+pub fn with_manual_polling(self) -> Self
+```
+
+Disables automatic background scanning. `PollWatcher` will only scan when `PollWatcher::poll()` or `PollWatcher::poll_blocking()` is called explicitly. Sets `poll_interval` to `None`.
+
+**Applies to:** `PollWatcher` only.
+
+---
+
+## Content comparison
+
+### `with_compare_contents`
+
+```rust
+pub fn with_compare_contents(self, compare_contents: bool) -> Self
+```
+
+When `true`, `PollWatcher` reads and hashes every watched file at each scan cycle and uses the hash to confirm whether the content actually changed. Particularly important for pseudo-filesystems such as `/proc` and `/sys` on Linux, where modification timestamps may not be updated.
+
+<ParamField path="compare_contents" type="bool">
+  `true` to enable content hashing; `false` (default) to rely on modification timestamps only.
+</ParamField>
+
+**Applies to:** `PollWatcher` only. Construction-time only — cannot be changed at runtime.
+
+<Warning>
+Enabling content comparison reads every watched file on every scan. This can be very expensive for large directory trees.
+</Warning>
+
+---
+
+### `compare_contents`
+
+```rust
+pub fn compare_contents(&self) -> bool
+```
+
+Returns the current content-comparison setting.
+
+---
+
+## Symlink following
+
+### `with_follow_symlinks`
+
+```rust
+pub fn with_follow_symlinks(self, follow_symlinks: bool) -> Self
+```
+
+Controls whether symbolic links are followed when recursively traversing watched directories.
+
+<ParamField path="follow_symlinks" type="bool">
+  `true` (default) follows symlinks; `false` treats them as ordinary directory entries.
+</ParamField>
+
+**Applies to:** `INotifyWatcher`, `KqueueWatcher`, `PollWatcher`. Construction-time only.
+
+---
+
+### `follow_symlinks`
+
+```rust
+pub fn follow_symlinks(&self) -> bool
+```
+
+Returns the current symlink-following setting.
+
+---
+
+## Event kind filtering
+
+### `with_event_kinds`
+
+```rust
+pub fn with_event_kinds(self, event_kinds: EventKindMask) -> Self
+```
+
+Specifies which event kinds are delivered to your handler. On backends that support kernel-level filtering (inotify), the mask is translated to native flags for optimal performance. On all other backends (kqueue, FSEvents, Windows, PollWatcher) filtering is applied in userspace.
+
+<ParamField path="event_kinds" type="EventKindMask">
+  A bitflag mask. The default is `EventKindMask::ALL` which includes every event. Use `EventKindMask::CORE` to exclude access events, or compose your own mask with bitwise OR.
+</ParamField>
+
+**Applies to:** All backends. Construction-time only.
+
+```rust
+use notify::{Config, EventKindMask};
+
+// Only creation and deletion
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+
+// Everything including file open/close events
+let config_all = Config::default()
+    .with_event_kinds(EventKindMask::ALL);
+```
+
+---
+
+### `event_kinds`
+
+```rust
+pub fn event_kinds(&self) -> EventKindMask
+```
+
+Returns the current event kind mask.
+
+---
+
+## Windows path separator style
+
+### `with_windows_path_separator_style`
+
+```rust
+pub fn with_windows_path_separator_style(self, style: WindowsPathSeparatorStyle) -> Self
+```
+
+Controls how path separators are represented in event paths emitted by `ReadDirectoryChangesWatcher` on Windows.
+
+<ParamField path="style" type="WindowsPathSeparatorStyle">
+  See [`WindowsPathSeparatorStyle`](#windowspathseparatorstyle) below. Default is `Auto`.
+</ParamField>
+
+**Applies to:** `ReadDirectoryChangesWatcher` only. Construction-time only.
+
+---
+
+### `windows_path_separator_style`
+
+```rust
+pub fn windows_path_separator_style(&self) -> WindowsPathSeparatorStyle
+```
+
+Returns the current separator style setting.
+
+---
+
+## FSEvents latency
+
+### `with_fsevent_latency`
+
+```rust
+pub fn with_fsevent_latency(self, latency: Duration) -> Self
+```
+
+Sets the latency passed to `FSEventStreamCreate` on macOS. A larger value lets the FSEvents service coalesce bursts of changes into fewer callbacks, at the cost of higher delivery latency. The stream is created with `kFSEventStreamCreateFlagNoDefer`, so the **first** event in an idle period is always delivered immediately; subsequent events within the window are coalesced.
+
+<ParamField path="latency" type="Duration">
+  How long to wait before invoking the event callback after the first change in a batch. Default is `Duration::ZERO`.
+</ParamField>
+
+**Applies to:** `FsEventWatcher` only. Construction-time only.
+
+---
+
+### `fsevent_latency`
+
+```rust
+pub fn fsevent_latency(&self) -> Duration
+```
+
+Returns the current FSEvents latency setting.
+
+---
+
+## `WindowsPathSeparatorStyle` enum
+
+Controls whether `ReadDirectoryChangesWatcher` normalises path separators in emitted event paths.
+
+```rust
+pub enum WindowsPathSeparatorStyle {
+    /// Infer separator from the watched input path (default).
+    /// Watching `C:/tmp` yields `/`; watching `C:\tmp` yields `\`.
+    Auto,
+
+    /// Always use `/` in emitted event paths.
+    Slash,
+
+    /// Always use `\` in emitted event paths.
+    Backslash,
+}
+```
+
+---
+
+## `WatchPathConfig`
+
+`WatchPathConfig` holds per-path settings for individual watch registrations. It is passed to `Watcher::watch_with` and embedded inside `PathOp::Watch`.
+
+### `WatchPathConfig::new`
+
+```rust
+pub fn new(recursive_mode: RecursiveMode) -> Self
+```
+
+<ParamField path="recursive_mode" type="RecursiveMode">
+  Whether to watch subdirectories recursively. `dereference_symlinks` defaults to `true`.
+</ParamField>
+
+### `with_recursive_mode`
+
+```rust
+pub fn with_recursive_mode(self, recursive_mode: RecursiveMode) -> Self
+```
+
+Replaces the recursive mode.
+
+### `recursive_mode`
+
+```rust
+pub fn recursive_mode(&self) -> RecursiveMode
+```
+
+Returns the current recursive mode.
+
+### `with_dereference_symlinks`
+
+```rust
+pub fn with_dereference_symlinks(self, dereference_symlinks: bool) -> Self
+```
+
+For `INotifyWatcher` with `RecursiveMode::NonRecursive` watches: controls whether a symbolic link is followed to its destination. Default is `true`.
+
+<ParamField path="dereference_symlinks" type="bool">
+  `true` (default) follows the symlink; `false` watches the symlink itself.
+</ParamField>
+
+**Applies to:** `INotifyWatcher`, `RecursiveMode::NonRecursive` only.
+
+### `dereference_symlinks`
+
+```rust
+pub fn dereference_symlinks(&self) -> bool
+```
+
+Returns the current dereference-symlinks setting.
+
+---
+
+## `PathOp` enum
+
+`PathOp` represents a single operation in a batch passed to `Watcher::update_paths`. Each variant carries the target path and (for `Watch`) a `WatchPathConfig`.
+
+```rust
+pub enum PathOp {
+    Watch(PathBuf, WatchPathConfig),
+    Unwatch(PathBuf),
+}
+```
+
+### Constructors
+
+#### `PathOp::watch_recursive`
+
+```rust
+pub fn watch_recursive<P: Into<PathBuf>>(path: P) -> Self
+```
+
+Creates a `Watch` variant with `RecursiveMode::Recursive`.
+
+#### `PathOp::watch_non_recursive`
+
+```rust
+pub fn watch_non_recursive<P: Into<PathBuf>>(path: P) -> Self
+```
+
+Creates a `Watch` variant with `RecursiveMode::NonRecursive`.
+
+#### `PathOp::unwatch`
+
+```rust
+pub fn unwatch<P: Into<PathBuf>>(path: P) -> Self
+```
+
+Creates an `Unwatch` variant.
+
+### Path accessors
+
+#### `as_path`
+
+```rust
+pub fn as_path(&self) -> &Path
+```
+
+Borrows the path associated with this operation, regardless of variant.
+
+#### `into_path`
+
+```rust
+pub fn into_path(self) -> PathBuf
+```
+
+Consumes the `PathOp` and returns the path, discarding any watch configuration.
+
+### Example
+
+```rust
+use notify::{PathOp, Watcher, NullWatcher};
+use std::path::PathBuf;
+
+let mut watcher = NullWatcher;
+let batch = vec![
+    PathOp::watch_recursive(PathBuf::from("/tmp/logs")),
+    PathOp::watch_non_recursive(PathBuf::from("/etc")),
+    PathOp::unwatch(PathBuf::from("/tmp/old")),
+];
+watcher.update_paths(batch)?;
+```
+
+---
+
+## `EventKindMask` bitflags
+
+`EventKindMask` is a `bitflags` type exported from `notify_types::event` and re-exported by `notify`. It controls which event kinds are reported by the watcher.
+
+```rust
+pub struct EventKindMask: u32 {
+    const CREATE              = 0b0000_0001;
+    const REMOVE              = 0b0000_0010;
+    const MODIFY_DATA         = 0b0000_0100;
+    const MODIFY_META         = 0b0000_1000;
+    const MODIFY_NAME         = 0b0001_0000;
+    const ACCESS_OPEN         = 0b0010_0000;
+    const ACCESS_CLOSE        = 0b0100_0000;  // close-after-write
+    const ACCESS_CLOSE_NOWRITE= 0b1000_0000;  // close-after-read
+
+    // Composites
+    const ALL_MODIFY = MODIFY_DATA | MODIFY_META | MODIFY_NAME;
+    const ALL_ACCESS = ACCESS_OPEN | ACCESS_CLOSE | ACCESS_CLOSE_NOWRITE;
+    const CORE       = CREATE | REMOVE | ALL_MODIFY;
+    const ALL        = CORE | ALL_ACCESS;  // default
+}
+```
+
+`EventKindMask::default()` equals `EventKindMask::ALL`.
+
+`EventKind::Any` and `EventKind::Other` always pass through regardless of the mask.
+
+### Composing masks
+
+```rust
+use notify::{Config, EventKindMask};
+
+// Watch only creates and deletes
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+
+// Watch everything except access events (open/close)
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CORE);
+
+// Explicitly watch all events (same as default)
+let config = Config::default()
+    .with_event_kinds(EventKindMask::ALL);
+```
+
+### `matches`
+
+```rust
+pub fn matches(&self, kind: &EventKind) -> bool
+```
+
+Returns `true` if the given `EventKind` is permitted by this mask. `EventKind::Any` and `EventKind::Other` always return `true`.

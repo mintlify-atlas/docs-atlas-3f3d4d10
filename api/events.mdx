@@ -1,0 +1,327 @@
+---
+title: "Event and EventKind — Filesystem Event Types"
+sidebarTitle: "Events"
+description: "Complete reference for notify's Event struct, the EventKind hierarchy, EventAttributes, EventKindMask bitflags, and all sub-enums for access, create, modify, and remove events."
+---
+
+Every filesystem change delivered by a notify watcher arrives as a `Result<Event>`. The `Event` struct carries the kind of change that occurred, the paths it affected, and optional platform-provided metadata through `EventAttributes`. Understanding the `EventKind` hierarchy lets you write precise event-handling logic and configure `EventKindMask` to receive only the events you care about.
+
+---
+
+## `Event` struct
+
+```rust
+pub struct Event {
+    pub kind: EventKind,
+    pub paths: Vec<PathBuf>,
+    pub attrs: EventAttributes,
+}
+```
+
+<ResponseField name="kind" type="EventKind">
+  Describes what happened. See [EventKind](#eventkind-enum) for the full hierarchy.
+</ResponseField>
+
+<ResponseField name="paths" type="Vec<PathBuf>">
+  The filesystem paths involved in the event. Paths use the same root representation (relative or absolute) that was passed to `Watcher::watch` or `Watcher::update_paths`. For rename events where both source and target are known (`RenameMode::Both`), paths are ordered `[from, to]`.
+</ResponseField>
+
+<ResponseField name="attrs" type="EventAttributes">
+  Optional platform-specific metadata. See [EventAttributes](#eventattributes) below.
+</ResponseField>
+
+### Builder methods on `Event`
+
+`Event` provides a set of builder methods for constructing events (used primarily by backends and tests):
+
+| Method | Description |
+|--------|-------------|
+| `Event::new(kind)` | Creates an event with empty paths and no attributes |
+| `add_path(PathBuf)` | Appends a path to `paths` |
+| `add_some_path(Option<PathBuf>)` | Appends a path if `Some` |
+| `set_kind(EventKind)` | Replaces the `kind` |
+| `set_tracker(usize)` | Sets the tracking ID attribute |
+| `set_flag(Flag)` | Sets the Notify flag attribute |
+| `set_info(&str)` | Sets the info string attribute |
+| `set_process_id(u32)` | Sets the process ID attribute (experimental) |
+
+### Convenience accessors
+
+```rust
+impl Event {
+    pub fn need_rescan(&self) -> bool;   // true if Flag::Rescan is set
+    pub fn tracker(&self) -> Option<usize>;
+    pub fn flag(&self) -> Option<Flag>;
+    pub fn info(&self) -> Option<&str>;
+    pub fn source(&self) -> Option<&str>;
+}
+```
+
+---
+
+## `EventKind` enum
+
+`EventKind` is the top-level classification for every event. Most application code matches on one of the four substantive variants.
+
+```rust
+#[non_exhaustive]
+pub enum EventKind {
+    /// Unknown or unclassifiable event (catch-all).
+    Any,
+
+    /// Non-mutating access to a file (open, close, read, execute).
+    Access(AccessKind),
+
+    /// A file or directory was created.
+    Create(CreateKind),
+
+    /// A file or directory was modified (data, metadata, or name).
+    Modify(ModifyKind),
+
+    /// A file or directory was removed.
+    Remove(RemoveKind),
+
+    /// A known event that does not fit any other category.
+    Other,
+}
+```
+
+`EventKind` implements `is_access()`, `is_create()`, `is_modify()`, `is_remove()`, and `is_other()` helper methods.
+
+<Note>
+Not all backends emit all event kinds. `EventKind::Any` is used when a backend knows _something_ happened but cannot determine the specific kind. `EventKind::Other` means the kind is known but cannot be represented by the defined variants; in that case `Event::info()` carries a short description string.
+</Note>
+
+---
+
+## `AccessKind`
+
+Describes non-mutating file access. Only some platforms can generate these events.
+
+```rust
+pub enum AccessKind {
+    Any,
+    Read,
+    Open(AccessMode),
+    Close(AccessMode),
+    Other,
+}
+```
+
+### `AccessMode`
+
+```rust
+pub enum AccessMode {
+    Any,
+    Execute,   // File was executed, or folder was opened
+    Read,      // Opened for reading
+    Write,     // Opened for writing
+    Other,
+}
+```
+
+**Example patterns:**
+
+| Event | Meaning |
+|-------|---------|
+| `Access(AccessKind::Open(AccessMode::Read))` | File opened for reading |
+| `Access(AccessKind::Close(AccessMode::Write))` | File handle closed after writing |
+| `Access(AccessKind::Read)` | File content was read |
+
+<Note>
+`EventKindMask::ACCESS_CLOSE` matches `Close(Write)` (closed after write). `EventKindMask::ACCESS_CLOSE_NOWRITE` matches `Close(Read)` (closed without writing). Use `EventKindMask::ALL_ACCESS` to receive all access events.
+</Note>
+
+---
+
+## `CreateKind`
+
+```rust
+pub enum CreateKind {
+    Any,     // Kind unknown
+    File,    // A file was created
+    Folder,  // A directory was created
+    Other,
+}
+```
+
+---
+
+## `ModifyKind`
+
+Describes a mutation. The nested enum specifies whether the data, metadata, or name changed.
+
+```rust
+pub enum ModifyKind {
+    Any,
+    Data(DataChange),
+    Metadata(MetadataKind),
+    Name(RenameMode),
+    Other,
+}
+```
+
+### `DataChange`
+
+```rust
+pub enum DataChange {
+    Any,
+    Size,     // The file size changed
+    Content,  // The file content changed
+    Other,
+}
+```
+
+### `MetadataKind`
+
+```rust
+pub enum MetadataKind {
+    Any,
+    AccessTime,   // The access timestamp changed
+    WriteTime,    // The write/modify timestamp changed
+    Permissions,  // File permissions changed
+    Ownership,    // Owner or group changed
+    Extended,     // An extended attribute changed
+    Other,
+}
+```
+
+When `MetadataKind::Extended` is emitted and more detail is available, the backend sets `Event::info()` to a string describing the attribute (e.g. `"meta: finder info"` on macOS).
+
+### `RenameMode`
+
+```rust
+pub enum RenameMode {
+    Any,   // Rename detected, but source or target unknown
+    To,    // This path is the rename target
+    From,  // This path was renamed away
+    Both,  // Both source and target are known; paths = [from, to]
+    Other,
+}
+```
+
+<Note>
+`RenameMode::Both` carries both paths in `Event::paths` in the order `[from, to]`. The inotify backend emits either `From` + `To` events with a matching tracker cookie, **or** a single `Both` event if both ends are resolved. FSEvents typically emits a synthetic `Both` event. `PollWatcher` emits a `Remove` followed by a `Create`.
+</Note>
+
+---
+
+## `RemoveKind`
+
+```rust
+pub enum RemoveKind {
+    Any,     // Kind unknown
+    File,    // A file was removed
+    Folder,  // A directory was removed
+    Other,
+}
+```
+
+---
+
+## `EventAttributes`
+
+`EventAttributes` carries optional, backend-specific metadata attached to an event. All fields are `None` unless the backend sets them.
+
+```rust
+pub struct EventAttributes { /* opaque */ }
+```
+
+| Accessor | Returns | Description |
+|----------|---------|-------------|
+| `tracker()` | `Option<usize>` | Tracking cookie for related events. The inotify backend uses the rename cookie to associate `RenameMode::From` and `RenameMode::To` events for the same rename. Treat as an opaque, backend-local value. |
+| `flag()` | `Option<Flag>` | A `Flag::Rescan` flag indicates the event stream may have gaps. |
+| `info()` | `Option<&str>` | A short human-readable string from the backend, primarily used to disambiguate `Other` variants. Backends set values such as `"unmount"`, `"root changed"`, `"mount"`, `"is: symlink"`. |
+| `source()` | `Option<&str>` | Identifies the backend that produced the event. Currently unset by built-in backends. |
+| `process_id()` | `Option<u32>` | PID of the process that triggered the event (experimental; not included in equality or hash). |
+
+### `Flag`
+
+```rust
+pub enum Flag {
+    Rescan,
+}
+```
+
+`Flag::Rescan` means some events may have been missed (e.g. the kernel event queue overflowed). Call `event.need_rescan()` as a shorthand check. If `true`, you should re-read the filesystem directly and not rely solely on the event stream to reconstruct state.
+
+---
+
+## `EventKindMask` bitflags
+
+`EventKindMask` is used in `Config::with_event_kinds` to filter which events are delivered. See the [full reference in the Config page](/api/config#eventkindmask-bitflags) for all flag values and the `matches` method.
+
+```rust
+use notify::{Config, EventKindMask};
+
+// Only file creations and deletions
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+
+// All events except access (open/close) events
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CORE);
+
+// All events (default)
+let config = Config::default(); // EventKindMask::ALL
+```
+
+---
+
+## Serde serialisation
+
+Events and all `EventKind` variants can be serialised and deserialised with `serde` if the `serde` Cargo feature is enabled:
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["serde"] }
+```
+
+Serialisation uses kebab-case tag names. By default (without `serialization-compat-6`), `EventKind` is serialised with a flattened `"type"` tag.
+
+---
+
+## Event handling examples
+
+### Matching event kinds
+
+```rust
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
+
+fn handle(event: notify::Event) {
+    match event.kind {
+        EventKind::Create(CreateKind::File) => {
+            println!("file created: {:?}", event.paths);
+        }
+        EventKind::Create(CreateKind::Folder) => {
+            println!("directory created: {:?}", event.paths);
+        }
+        EventKind::Remove(_) => {
+            println!("removed: {:?}", event.paths);
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            // paths = [from, to]
+            println!("renamed {:?} -> {:?}", event.paths[0], event.paths[1]);
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            println!("renamed away: {:?} (tracker={:?})", event.paths, event.tracker());
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            println!("renamed to: {:?} (tracker={:?})", event.paths, event.tracker());
+        }
+        _ => {}
+    }
+}
+```
+
+### Handling rescan notices
+
+```rust
+fn handle(event: notify::Event) {
+    if event.need_rescan() {
+        eprintln!("events may have been missed — rescanning filesystem");
+        // Re-read directory state here
+        return;
+    }
+    // Normal event processing
+}
+```

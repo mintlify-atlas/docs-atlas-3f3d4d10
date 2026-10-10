@@ -1,0 +1,415 @@
+---
+title: "Migrate from notify v4 to v5"
+sidebarTitle: "v4 → v5"
+description: "Upgrade guide from the legacy notify v4 API to v5: new event taxonomy, Watcher trait changes, error types, and configuration model."
+---
+
+notify v5 is a significant redesign of the library's public API. The event model was rebuilt from scratch around a precise, platform-neutral taxonomy, the debouncing layer was extracted into separate crates, the `Watcher` trait was simplified, and the configuration model was unified. This guide covers every breaking change with before-and-after examples so you can upgrade with confidence.
+
+<Warning>
+  All of the changes in this guide are **breaking**. You will need to update your `Cargo.toml` dependency and touch most call sites that interact with notify.
+</Warning>
+
+## Dependency update
+
+```toml
+[dependencies]
+# v4
+notify = "4"
+
+# v5
+notify = "5"
+```
+
+If you used the debounced API in v4, add the appropriate debouncer crate (see [Debounced events](#debounced-events) below).
+
+---
+
+## Event model
+
+### Precise events replace `RawEvent` and `DebouncedEvent`
+
+notify v4 exposed two parallel event types:
+
+- `RawEvent` — low-level, platform-specific.
+- `DebouncedEvent` — a coalesced view produced by the default debounced watcher.
+
+Both are gone in v5. They are replaced by a single `Event` type that always carries precise, structured information without any implicit debouncing.
+
+<Tabs>
+  <Tab title="v4 (RawEvent)">
+    ```rust
+    use notify::{RawEvent, RecursiveMode, Watcher, raw_watcher};
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = channel();
+    let mut watcher = raw_watcher(tx).unwrap();
+    watcher.watch("/path/to/dir", RecursiveMode::Recursive).unwrap();
+
+    for event in rx {
+        match event {
+            RawEvent { path: Some(path), op: Ok(op), .. } => {
+                println!("{:?} {:?}", op, path);
+            }
+            _ => {}
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="v5 (Event)">
+    ```rust
+    use notify::{Event, RecursiveMode, Result, Watcher};
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = channel::<Result<Event>>();
+    let mut watcher = notify::recommended_watcher(tx).unwrap();
+    watcher.watch("/path/to/dir".as_ref(), RecursiveMode::Recursive).unwrap();
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("{:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### New `EventKind` hierarchy
+
+v4 represented event categories as a `notify::op::Op` bitflag set (`CREATE`, `WRITE`, `REMOVE`, `RENAME`, `CHMOD`). v5 replaces this with a structured `EventKind` enum that nests sub-kinds for more precise classification:
+
+```rust
+pub enum EventKind {
+    Any,
+    Access(AccessKind),
+    Create(CreateKind),
+    Modify(ModifyKind),
+    Remove(RemoveKind),
+    Other,
+}
+```
+
+Each variant has its own sub-enum. For example, `ModifyKind` distinguishes between data changes, metadata changes, renames, and others:
+
+```rust
+pub enum ModifyKind {
+    Any,
+    Data(DataChange),
+    Metadata(MetadataKind),
+    Name(RenameMode),
+    Other,
+}
+```
+
+<Tabs>
+  <Tab title="v4 (Op bitflags)">
+    ```rust
+    use notify::op;
+
+    match event.op {
+        Ok(op) if op.contains(op::WRITE) => { /* file written */ }
+        Ok(op) if op.contains(op::CREATE) => { /* file created */ }
+        Ok(op) if op.contains(op::REMOVE) => { /* file removed */ }
+        Ok(op) if op.contains(op::RENAME) => { /* file renamed */ }
+        _ => {}
+    }
+    ```
+  </Tab>
+  <Tab title="v5 (EventKind)">
+    ```rust
+    use notify::event::{EventKind, ModifyKind, CreateKind, RemoveKind};
+
+    match event.kind {
+        EventKind::Modify(ModifyKind::Data(_)) => { /* file data written */ }
+        EventKind::Modify(ModifyKind::Name(_)) => { /* file renamed */ }
+        EventKind::Create(CreateKind::File) => { /* file created */ }
+        EventKind::Remove(RemoveKind::File) => { /* file removed */ }
+        _ => {}
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The precision of event kinds varies by platform. Many backends report `EventKind::Any` or `ModifyKind::Any` when the OS does not supply enough information to determine the exact sub-kind. Always include a wildcard arm when matching.
+</Note>
+
+---
+
+## Debounced events
+
+### `DebouncedEvent` removed from the core crate
+
+In v4, the default `Watcher` constructor returned a debounced watcher that coalesced nearby events into higher-level `DebouncedEvent` variants (`NoticeWrite`, `NoticeRemove`, `Create`, `Write`, `Chmod`, `Remove`, `Rename`, `Rescan`, `Error`).
+
+In v5, **no debouncing happens inside `notify` itself**. The core crate only delivers precise events. Debouncing has been extracted into two separate crates:
+
+| Crate | Purpose |
+|---|---|
+| [`notify-debouncer-mini`](https://crates.io/crates/notify-debouncer-mini) | Minimal debouncer that emits a single `DebouncedEvent::Any` after a quiet period. |
+| [`notify-debouncer-full`](https://crates.io/crates/notify-debouncer-full) | Full debouncer with richer event merging and ordering guarantees. |
+
+<Warning>
+  The new `DebouncedEvent` in `notify-debouncer-mini` is named the same as the old one but carries very different semantics. It reports only an `Any`-like signal rather than specific `Write`/`Create`/`Remove` kinds, because reliably determining those kinds after debouncing is [not possible across all platforms](https://github.com/notify-rs/notify/issues/261).
+</Warning>
+
+If you relied on the debounced API in v4, add the debouncer crate to `Cargo.toml` and update your handler:
+
+<Tabs>
+  <Tab title="v4 (built-in debounced watcher)">
+    ```rust
+    use notify::{DebouncedEvent, RecursiveMode, Watcher, watcher};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let (tx, rx) = channel();
+    // The second argument is the debounce delay.
+    let mut watcher = watcher(tx, Duration::from_secs(2)).unwrap();
+    watcher.watch("/path/to/dir", RecursiveMode::Recursive).unwrap();
+
+    loop {
+        match rx.recv() {
+            Ok(DebouncedEvent::Write(path)) => println!("written: {:?}", path),
+            Ok(DebouncedEvent::Create(path)) => println!("created: {:?}", path),
+            Ok(event) => println!("other event: {:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="v5 (notify-debouncer-mini)">
+    ```rust
+    use notify::RecursiveMode;
+    use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
+    use std::time::Duration;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut debouncer = new_debouncer(Duration::from_secs(2), tx).unwrap();
+    debouncer
+        .watcher()
+        .watch("/path/to/dir".as_ref(), RecursiveMode::Recursive)
+        .unwrap();
+
+    for events in rx {
+        match events {
+            Ok(events) => {
+                for event in events {
+                    // DebouncedEvent::Any — check the file state yourself
+                    println!("changed: {:?}", event.path);
+                }
+            }
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  In most cases where you used `DebouncedEvent::Write` in v4, the right v5 approach is to re-read the file (or re-run the relevant logic) whenever a debounced notification arrives, rather than branching on which specific event kind was received.
+</Tip>
+
+---
+
+## `Watcher` trait
+
+### Constructor signature changed
+
+v4 exposed separate free functions for each watcher variant (`watcher`, `raw_watcher`, and platform-specific constructors). v5 unifies watcher construction behind the `Watcher` trait and the `recommended_watcher` convenience function.
+
+<Tabs>
+  <Tab title="v4">
+    ```rust
+    use notify::{RecursiveMode, Watcher, raw_watcher};
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = channel();
+    let mut watcher = raw_watcher(tx).unwrap();
+    watcher.watch("/path/to/dir", RecursiveMode::Recursive).unwrap();
+    ```
+  </Tab>
+  <Tab title="v5">
+    ```rust
+    use notify::{RecursiveMode, Result, Watcher};
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = channel::<Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(tx).unwrap();
+    watcher.watch("/path/to/dir".as_ref(), RecursiveMode::Recursive).unwrap();
+    ```
+  </Tab>
+</Tabs>
+
+### `EventHandler` trait for callbacks and channels
+
+The v5 `Watcher::new` (and `recommended_watcher`) accept any type that implements the `EventHandler` trait, not just `std::sync::mpsc::Sender`. This includes closures, `std::sync::mpsc::Sender<Result<Event>>`, and (with feature flags) `crossbeam_channel::Sender`, `flume::Sender`, and others.
+
+```rust
+// Closure as handler
+let mut watcher = notify::recommended_watcher(|res: notify::Result<notify::Event>| {
+    match res {
+        Ok(event) => println!("event: {:?}", event),
+        Err(e) => println!("watch error: {:?}", e),
+    }
+})?;
+```
+
+### `watch` path argument is now `&Path`
+
+The `watch` method signature changed from accepting `impl AsRef<Path>` to requiring an explicit `&Path` reference:
+
+<Tabs>
+  <Tab title="v4">
+    ```rust
+    watcher.watch("/some/path", RecursiveMode::Recursive).unwrap();
+    ```
+  </Tab>
+  <Tab title="v5">
+    ```rust
+    use std::path::Path;
+    watcher.watch(Path::new("/some/path"), RecursiveMode::Recursive).unwrap();
+    // or with a PathBuf:
+    watcher.watch(path_buf.as_path(), RecursiveMode::Recursive).unwrap();
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Configuration
+
+### Unified `Config` struct
+
+v4 had no common configuration type — options were passed via constructor arguments or platform-specific APIs. v5 introduces a single `Config` struct that is passed to `Watcher::new` and can be updated at runtime via `Watcher::configure`:
+
+```rust
+use notify::{Config, RecursiveMode, Watcher};
+
+let config = Config::default();
+let mut watcher = notify::RecommendedWatcher::new(event_handler, config)?;
+
+// Runtime reconfiguration
+watcher.configure(Config::default().with_poll_interval(std::time::Duration::from_secs(1)))?;
+```
+
+<Note>
+  `Watcher::configure` returns `Ok(true)` if the option was applied, `Ok(false)` if the backend does not support the option, and `Err(...)` on failure. Always check the return value if you depend on a specific option taking effect.
+</Note>
+
+### `PollWatcher` and `compare_contents`
+
+The `PollWatcher` now takes a `Config` argument. Options that only apply to polling (such as `compare_contents`, which triggers content hashing to detect changes on pseudo-filesystems like `/proc`) are passed through `Config`:
+
+<Tabs>
+  <Tab title="v4">
+    ```rust
+    // PollWatcher had its own constructor arguments
+    let mut watcher = notify::PollWatcher::with_delay(tx, Duration::from_secs(1)).unwrap();
+    ```
+  </Tab>
+  <Tab title="v5">
+    ```rust
+    use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+    use std::time::Duration;
+
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(1))
+        .with_compare_contents(true);
+
+    let mut watcher = PollWatcher::new(event_handler, config).unwrap();
+    watcher.watch("/path/to/dir".as_ref(), RecursiveMode::Recursive).unwrap();
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Error types
+
+### `notify::Error` is now structured
+
+v4 used a simple `notify::Error` enum with a limited set of variants. v5 replaces it with a richer `Error` type that carries a `kind: ErrorKind` field and optional path information:
+
+```rust
+pub struct Error {
+    pub kind: ErrorKind,
+    pub paths: Vec<std::path::PathBuf>,
+}
+
+pub enum ErrorKind {
+    Generic(String),
+    Io(std::io::Error),
+    PathNotFound,
+    WatchNotFound,
+    InvalidConfig(Config),
+    MaxFilesWatch,
+}
+```
+
+Event handlers and `watch` / `unwatch` return `notify::Result<T>`, which is `std::result::Result<T, notify::Error>`. Update any match arms that pattern-matched the old error variants:
+
+<Tabs>
+  <Tab title="v4">
+    ```rust
+    use notify::Error;
+
+    match result {
+        Err(Error::Generic(msg)) => eprintln!("generic error: {}", msg),
+        Err(Error::Io(e)) => eprintln!("io error: {}", e),
+        Err(Error::PathNotFound) => eprintln!("path not found"),
+        Err(Error::WatchNotFound) => eprintln!("watch not found"),
+        Ok(_) => {}
+    }
+    ```
+  </Tab>
+  <Tab title="v5">
+    ```rust
+    use notify::ErrorKind;
+
+    match result {
+        Err(e) => match e.kind {
+            ErrorKind::Generic(ref msg) => eprintln!("generic error: {}", msg),
+            ErrorKind::Io(ref io_err) => eprintln!("io error: {}", io_err),
+            ErrorKind::PathNotFound => eprintln!("path not found"),
+            ErrorKind::WatchNotFound => eprintln!("watch not found"),
+            ErrorKind::MaxFilesWatch => eprintln!("inotify watch limit reached"),
+            _ => eprintln!("other error: {:?}", e),
+        },
+        Ok(_) => {}
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Platform support
+
+v5 expanded platform coverage compared to v4:
+
+| Platform | v4 | v5 |
+|---|---|---|
+| Linux / Android | inotify | inotify |
+| macOS | FSEvents | FSEvents (default) **or** kqueue (`macos_kqueue` feature) |
+| Windows | ReadDirectoryChanges | ReadDirectoryChanges |
+| BSD | — | kqueue |
+| All platforms (fallback) | PollWatcher | PollWatcher |
+
+<Tip>
+  Use the `macos_kqueue` feature if you need kqueue semantics on macOS (for example, when testing BSD-compatible behaviour). The default FSEvents backend remains the recommended choice for production macOS applications.
+</Tip>
+
+### Crate features
+
+v4 had no notable feature flags. v5 adds:
+
+| Feature | Default | Purpose |
+|---|---|---|
+| `crossbeam-channel` | Off | Enable `crossbeam_channel::Sender` as an `EventHandler`. Required on some Tokio builds. |
+| `macos_kqueue` | Off | Use kqueue instead of FSEvents on macOS. |
+| `serde` | Off | Derive `Serialize`/`Deserialize` for event types. |
+
+<Note>
+  In earlier v5 releases, `crossbeam-channel` was enabled by default (feature was called `crossbeam`). It was renamed and disabled by default in v7. If you migrated directly from v4 to a recent v5+ release, check that you enable the feature explicitly if your code depends on it.
+</Note>

@@ -1,0 +1,213 @@
+---
+title: "Filtering Filesystem Events with EventKindMask"
+sidebarTitle: "Event Filtering"
+description: "Filter delivered filesystem events at the kernel level on inotify or in userspace on other backends using Config::with_event_kinds() and EventKindMask bitflags."
+---
+
+Every file operation on a modern operating system generates multiple kernel events. A single `cat` command can produce an `OPEN`, one or more `READ`, and a `CLOSE_NOWRITE` event — none of which represent a meaningful change to the file's content. By default, `notify` delivers all of these through `EventKindMask::ALL`. For most applications, this is too much noise. `EventKindMask` is a bitflags type that lets you declare exactly which event categories you care about, reducing callback frequency and, on Linux's inotify backend, avoiding unnecessary wakeups at the kernel level.
+
+## `EventKindMask` Predefined Constants
+
+| Constant | What it covers |
+|---|---|
+| `EventKindMask::ALL` | Every event kind, including access events (default) |
+| `EventKindMask::CORE` | `CREATE \| REMOVE \| MODIFY_DATA \| MODIFY_META \| MODIFY_NAME` — no access events |
+| `EventKindMask::CREATE` | File or directory creation |
+| `EventKindMask::REMOVE` | File or directory deletion |
+| `EventKindMask::MODIFY_DATA` | File content changes |
+| `EventKindMask::MODIFY_META` | Metadata changes (permissions, timestamps, etc.) |
+| `EventKindMask::MODIFY_NAME` | Renames and moves |
+| `EventKindMask::ALL_ACCESS` | Open, close, and other access events |
+
+Constants can be combined with the bitwise OR operator (`|`) to create any custom mask.
+
+---
+
+## Configuring the Watcher
+
+Pass your mask to `Config::with_event_kinds()` and supply that config when constructing the watcher:
+
+```rust
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
+
+// Only care about file creation and deletion
+let (tx, rx) = std::sync::mpsc::channel();
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+let mut watcher = RecommendedWatcher::new(tx, config)?;
+watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+```
+
+```rust
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
+
+// Everything except access events (OPEN, CLOSE)
+let (tx, rx) = std::sync::mpsc::channel();
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CORE);
+let mut watcher = RecommendedWatcher::new(tx, config)?;
+watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+```
+
+<Note>
+  `Config::with_event_kinds` cannot be changed at runtime with `Watcher::configure`. Set the mask once before calling `RecommendedWatcher::new` or `PollWatcher::new`.
+</Note>
+
+---
+
+## Backend Behaviour
+
+The depth at which filtering is applied depends on the platform backend:
+
+- **Linux (inotify):** The mask is translated into native inotify flags (`IN_CREATE`, `IN_DELETE`, `IN_MODIFY`, `IN_CLOSE_WRITE`, `IN_MOVED_FROM`, `IN_MOVED_TO`, etc.) and passed straight to the kernel. Events that don't match are never delivered to userspace, making this the most efficient option.
+- **All other backends** (FSEvents on macOS, kqueue on BSD, `ReadDirectoryChangesWatcher` on Windows, and `PollWatcher`): The native event stream is received in full and then filtered in userspace inside Notify before your handler is called.
+
+<Tip>
+  Even on macOS and Windows, using `EventKindMask::CORE` is worthwhile: it removes the burden of matching and discarding unwanted events in your application code and makes the intent of your watcher immediately clear.
+</Tip>
+
+---
+
+## Available Event Modes (from the `event_filtering` example)
+
+The official `event_filtering` example in the Notify repository shows three typical configurations:
+
+```rust
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+
+/// Watch with ALL events (default behavior, backward compatible)
+fn watch_all<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // Default config receives all events including access events (OPEN, CLOSE)
+    let config = Config::default();
+    // Equivalent to: Config::default().with_event_kinds(EventKindMask::ALL)
+
+    let mut watcher = RecommendedWatcher::new(tx, config)?;
+    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("Event: {:?}", event),
+            Err(error) => eprintln!("Error: {:?}", error),
+        }
+    }
+    Ok(())
+}
+
+/// Watch with CORE events only (excludes noisy access events)
+fn watch_core<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // CORE mask excludes access events, reducing noise significantly
+    let config = Config::default().with_event_kinds(EventKindMask::CORE);
+
+    let mut watcher = RecommendedWatcher::new(tx, config)?;
+    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("Event: {:?}", event),
+            Err(error) => eprintln!("Error: {:?}", error),
+        }
+    }
+    Ok(())
+}
+
+/// Watch only file creation and removal events
+fn watch_create_remove<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let config =
+        Config::default().with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+
+    let mut watcher = RecommendedWatcher::new(tx, config)?;
+    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("Event: {:?}", event),
+            Err(error) => eprintln!("Error: {:?}", error),
+        }
+    }
+    Ok(())
+}
+```
+
+---
+
+## Using Filtered Config with `notify-debouncer-full`
+
+`notify-debouncer-full` exposes `new_debouncer_opt` which accepts a full `notify::Config`. Pass your `EventKindMask` there to apply filtering before events reach the debouncer:
+
+```rust
+use std::time::Duration;
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
+
+let (tx, rx) = std::sync::mpsc::channel();
+
+// Exclude access events from the debouncer's input stream
+let notify_config = notify::Config::default()
+    .with_event_kinds(EventKindMask::CORE);
+
+let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
+    Duration::from_secs(2), // debounce timeout
+    None,                   // tick rate (None = auto)
+    tx,
+    RecommendedCache::new(),
+    notify_config,
+)?;
+
+debouncer.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+
+for result in rx {
+    match result {
+        Ok(events) => events.iter().for_each(|event| println!("{event:?}")),
+        Err(errors) => errors.iter().for_each(|error| eprintln!("{error:?}")),
+    }
+}
+```
+
+---
+
+## Manual Event-Kind Matching as a Fallback
+
+If you need more granular control than `EventKindMask` provides — for example, distinguishing between `ModifyKind::Data` and `ModifyKind::Metadata` subtypes — match on `EventKind` directly in your handler:
+
+```rust
+use notify::event::{EventKind, ModifyKind, DataChange, MetadataKind};
+use notify::{Event, Result};
+
+fn handle(res: Result<Event>) {
+    let event = match res {
+        Ok(e) => e,
+        Err(e) => { eprintln!("watch error: {:?}", e); return; }
+    };
+
+    match event.kind {
+        EventKind::Create(_) => {
+            println!("created: {:?}", event.paths);
+        }
+        EventKind::Remove(_) => {
+            println!("removed: {:?}", event.paths);
+        }
+        EventKind::Modify(ModifyKind::Data(DataChange::Any)) => {
+            println!("content changed: {:?}", event.paths);
+        }
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)) => {
+            // suppress noisy write-time updates
+        }
+        _ => {}
+    }
+}
+```
+
+---
+
+## Platform Notes
+
+<Warning>
+  **macOS / APFS — `MODIFY_META` can be noisy.** On APFS, `std::fs::copy` may use copy-on-write cloning (`fclonefileat` / `clonefile`). This updates inode metadata on the **source** file, and FSEvents reports it as a metadata-change event on the source path even though no data changed. If you don't need metadata events, exclude them with a mask that omits `EventKindMask::MODIFY_META`, or switch from `std::fs::copy` to `std::io::copy`.
+</Warning>

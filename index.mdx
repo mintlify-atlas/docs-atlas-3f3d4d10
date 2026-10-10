@@ -1,20 +1,91 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Notify: Cross-Platform Filesystem Notifications for Rust"
+sidebarTitle: "Home"
+description: "Notify is a cross-platform filesystem notification library for Rust. Watch files and directories for changes using native OS APIs on Linux, macOS, Windows, and BSD."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Notify is the de-facto standard filesystem watcher for Rust, used by [Deno](https://deno.land), [rust-analyzer](https://rust-analyzer.github.io), [Zed](https://zed.dev), [mdBook](https://rust-lang.github.io/mdBook/), and many more. It wraps native OS APIs — inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows, kqueue on BSD — and falls back to polling on any platform.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Watch your first path and handle events in under five minutes.
+  </Card>
+  <Card title="Installation" icon="box" href="/installation">
+    Add Notify and its companion crates to your Cargo.toml.
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/watchers">
+    Understand watchers, events, configuration, and backends.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/watcher-trait">
+    Full reference for the Watcher trait and every public type.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What's in the workspace
+
+Notify ships as a workspace of five focused crates. Pick what you need:
+
+<CardGroup cols={2}>
+  <Card title="notify" icon="eye" href="/concepts/watchers">
+    The core watcher crate. Provides `recommended_watcher()`, the `Watcher` trait, and platform backends.
+  </Card>
+  <Card title="notify-debouncer-mini" icon="gauge" href="/debouncing/debouncer-mini">
+    Lightweight debouncer. Emits one event per path per timeout window — ideal for simple use cases.
+  </Card>
+  <Card title="notify-debouncer-full" icon="wand-magic-sparkles" href="/debouncing/debouncer-full">
+    Smart debouncer with rename stitching, duplicate suppression, and optional file-ID tracking.
+  </Card>
+  <Card title="file-id" icon="fingerprint" href="/api/file-id">
+    Read inode numbers (Linux/macOS) and file IDs (Windows) for stable file identity across renames.
+  </Card>
+</CardGroup>
+
+## Get started in three steps
+
+<Steps>
+  <Step title="Add Notify to Cargo.toml">
+    ```toml Cargo.toml
+    [dependencies]
+    notify = "9.0.0-rc.5"
+    ```
+  </Step>
+  <Step title="Create a watcher and watch a path">
+    ```rust main.rs
+    use notify::{recommended_watcher, RecursiveMode, Result, Watcher};
+    use std::{path::Path, sync::mpsc};
+
+    fn main() -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = recommended_watcher(tx)?;
+        watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+        for res in rx {
+            match res {
+                Ok(event) => println!("event: {:?}", event),
+                Err(e)    => println!("error: {:?}", e),
+            }
+        }
+        Ok(())
+    }
+    ```
+  </Step>
+  <Step title="Handle events">
+    Each `Event` carries a `kind` (`Create`, `Modify`, `Remove`, …) and a list of affected `paths`. Filter, debounce, or act on them however your application requires.
+  </Step>
+</Steps>
+
+## Platform support
+
+| Platform | Backend | Crate feature |
+|---|---|---|
+| Linux / Android | inotify | *(default)* |
+| macOS | FSEvents | `macos_fsevent` *(default)* |
+| macOS (alt) | kqueue | `macos_kqueue` |
+| Windows | ReadDirectoryChangesW | *(default)* |
+| FreeBSD 14.5+ | inotify | `freebsd_inotify` for cross-builds |
+| FreeBSD (older), OpenBSD, NetBSD, iOS | kqueue | *(default)* |
+| All platforms | Polling | Always available via `PollWatcher` |
+
+<Note>
+  The minimum supported Rust version (MSRV) is **1.88**. MSRV bumps are documented in the [changelog](https://github.com/notify-rs/notify/blob/main/CHANGELOG.md) and may occur in minor releases.
+</Note>

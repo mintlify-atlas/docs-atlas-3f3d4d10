@@ -1,0 +1,266 @@
+---
+title: "PollWatcher — Cross-Platform Polling Fallback"
+sidebarTitle: "PollWatcher"
+description: "Reference for notify::PollWatcher: polling-based filesystem watcher that works on network mounts, pseudo filesystems, and any platform without native events."
+---
+
+`PollWatcher` is a filesystem watcher built entirely on Rust's standard library. Instead of registering for OS-level kernel notifications, it periodically scans the watched paths, compares metadata (and optionally file content hashes) against a stored snapshot, and emits events for anything that changed. Because it relies on no OS-specific API, it works everywhere — including network mounts, pseudo filesystems such as `/proc` and `/sys`, Docker containers where the native backend is unavailable, and WSL programs watching Windows paths.
+
+`PollWatcher` is always available regardless of the target platform or enabled Cargo features.
+
+---
+
+## Construction
+
+### `PollWatcher::new`
+
+```rust
+pub fn new<F: EventHandler>(event_handler: F, config: Config) -> Result<PollWatcher>
+```
+
+Creates a new `PollWatcher`. The `config` value controls the polling interval, content comparison, and other behaviour. See [Config options for PollWatcher](#config-options-for-pollwatcher) below.
+
+<ParamField path="event_handler" type="F: EventHandler">
+  The handler that receives `Result<Event>` values. Accepts any closure, standard library sender, or channel sender that implements `EventHandler`.
+</ParamField>
+
+<ParamField path="config" type="Config">
+  Watcher configuration. You must supply a poll interval (via `with_poll_interval`) or switch to manual mode (via `with_manual_polling`). The default `Config` uses a 30-second auto-poll interval.
+</ParamField>
+
+**Returns** `Result<PollWatcher>`.
+
+---
+
+### `PollWatcher::with_initial_scan`
+
+```rust
+pub fn with_initial_scan<F: EventHandler, G: ScanEventHandler>(
+    event_handler: F,
+    config: Config,
+    scan_callback: G,
+) -> Result<PollWatcher>
+```
+
+Creates a `PollWatcher` with an additional scan-event handler. During the initial directory scan, `scan_callback` receives a `Result<PathBuf>` for every file and directory seen by the watcher. This is useful for building an initial inventory of the watched tree.
+
+<ParamField path="event_handler" type="F: EventHandler">
+  Receives ongoing filesystem change events.
+</ParamField>
+
+<ParamField path="config" type="Config">
+  Watcher configuration.
+</ParamField>
+
+<ParamField path="scan_callback" type="G: ScanEventHandler">
+  Called once per file/directory during the initial scan. `ScanEventHandler` is implemented for closures `FnMut(Result<PathBuf>)`, `std::sync::mpsc::Sender<Result<PathBuf>>`, and (with their respective features) `crossbeam_channel::Sender` and `flume::Sender`.
+</ParamField>
+
+---
+
+## Polling methods
+
+### `poll`
+
+```rust
+pub fn poll(&self) -> Result<()>
+```
+
+Triggers an immediate scan without waiting for the next scheduled poll. Returns as soon as the scan request is enqueued (the scan itself runs on a background thread). Useful in manual polling mode or when you want a forced refresh between auto-poll cycles.
+
+**Returns** `Result<()>`.
+
+---
+
+### `poll_blocking`
+
+```rust
+pub fn poll_blocking(&self) -> Result<()>
+```
+
+Triggers an immediate scan and blocks until that scan cycle has fully completed. This is the preferred method when used together with `Config::with_manual_polling()` because it guarantees all change events from the scan have been dispatched to your handler before returning.
+
+**Returns** `Result<()>`.
+
+---
+
+## Config options for PollWatcher
+
+`PollWatcher` reads several `Config` fields at construction time. None of these can be changed at runtime via `Watcher::configure`.
+
+### `with_poll_interval`
+
+```rust
+Config::default().with_poll_interval(Duration::from_secs(2))
+```
+
+Sets the interval between automatic background scans. The watcher performs an immediate first scan when created, then sleeps for this duration between subsequent scans. The default is **30 seconds**.
+
+Calling `with_poll_interval` also re-enables automatic polling if `with_manual_polling` was called earlier.
+
+<Warning>
+Short poll intervals on large directory trees can be extremely CPU- and I/O-intensive because every scan reads metadata (and optionally hashes) for every watched file. Measure and tune the interval for your use case.
+</Warning>
+
+---
+
+### `with_manual_polling`
+
+```rust
+Config::default().with_manual_polling()
+```
+
+Disables the automatic background scan loop. The watcher will only scan when you call `poll()` or `poll_blocking()` explicitly. This gives you full control over scan timing and is useful for test scenarios or batch-processing workflows where you want to control exactly when a scan happens.
+
+---
+
+### `with_compare_contents`
+
+```rust
+Config::default()
+    .with_poll_interval(Duration::from_secs(10))
+    .with_compare_contents(true)
+```
+
+When `true`, the watcher computes an xxHash (xxh3) of each file's contents at every scan and compares it against the stored hash. A change is emitted only when either the modification timestamp or the hash differs. This is **off by default**.
+
+Enable this option when watching pseudo-filesystems such as `/proc` or `/sys` on Linux, where modification timestamps are not updated reliably and content comparison is the only way to detect changes.
+
+<Warning>
+Content comparison reads every watched file on every scan. On large trees or with short poll intervals this can become very expensive. Only enable it when necessary.
+</Warning>
+
+---
+
+### `with_follow_symlinks`
+
+```rust
+Config::default().with_follow_symlinks(false)
+```
+
+Controls whether symbolic links are followed when recursively scanning a directory. **On by default.** Set to `false` to watch symlinks as entries rather than following them to their targets.
+
+---
+
+## Examples
+
+### Automatic polling
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, sync::mpsc, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = mpsc::channel();
+
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(2));
+
+    let mut watcher = PollWatcher::new(tx, config)?;
+    watcher.watch(Path::new("/proc/net"), RecursiveMode::NonRecursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => eprintln!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+### Manual polling
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, sync::mpsc, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = mpsc::channel();
+
+    let config = Config::default().with_manual_polling();
+
+    let mut watcher = PollWatcher::new(tx, config)?;
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    // Later, trigger a scan on demand:
+    watcher.poll_blocking()?;
+
+    for res in rx.try_iter() {
+        println!("{:?}", res);
+    }
+
+    Ok(())
+}
+```
+
+### Content hashing for `/proc`
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, sync::mpsc, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = mpsc::channel();
+
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(5))
+        .with_compare_contents(true)
+        .with_follow_symlinks(false);
+
+    let mut watcher = PollWatcher::new(tx, config)?;
+    watcher.watch(Path::new("/proc/sys/net"), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        println!("{:?}", res);
+    }
+
+    Ok(())
+}
+```
+
+### Receiving initial scan events
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, sync::mpsc, time::Duration};
+
+fn main() -> notify::Result<()> {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (scan_tx, scan_rx) = mpsc::channel();
+
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(30));
+
+    let mut watcher = PollWatcher::with_initial_scan(event_tx, config, scan_tx)?;
+    watcher.watch(Path::new("/var/log"), RecursiveMode::Recursive)?;
+
+    // Collect all initially-known paths
+    let initial_paths: Vec<_> = scan_rx
+        .try_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+
+    println!("initial scan found {} paths", initial_paths.len());
+
+    for res in event_rx {
+        println!("change: {:?}", res);
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## Performance notes
+
+<Tip>
+For most use cases where native backend events are available, prefer `RecommendedWatcher`. Use `PollWatcher` only when native events are not reliable (network mounts, pseudo-filesystems, Docker on macOS M1) or when you need the poll timing guarantees of manual mode.
+</Tip>
+
+- Watching a large directory tree with a short poll interval will stat every file and directory on every scan cycle. This generates significant I/O even if nothing changes.
+- `with_compare_contents(true)` adds a full file read and hash computation on top of the metadata stat for every file, every cycle.
+- Use `RecursiveMode::NonRecursive` together with coarser intervals wherever full recursion is not required.
+- `PollWatcher` is not subject to inotify watch limits (`fs.inotify.max_user_watches`) and can therefore serve as a fallback when those limits are exhausted.

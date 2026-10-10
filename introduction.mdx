@@ -1,0 +1,82 @@
+---
+title: "Notify: Cross-Platform Filesystem Watcher for Rust"
+sidebarTitle: "Introduction"
+description: "Notify is a cross-platform filesystem notification library for Rust, wrapping inotify, FSEvents, kqueue, and ReadDirectoryChangesW with a unified API."
+---
+
+Notify is a cross-platform filesystem notification library for Rust. It wraps the native OS filesystem event APIs on each supported platform behind a single, unified `Watcher` trait, so your code doesn't change regardless of whether it runs on Linux, macOS, Windows, or BSD. When no native backend is available, or when watching network-mounted or pseudo filesystems, Notify falls back to a built-in polling watcher that works everywhere.
+
+## Platform Support
+
+Each platform is covered by its highest-fidelity native backend. Notify selects the right one automatically when you call `recommended_watcher()`.
+
+| Platform | Native Backend |
+|---|---|
+| Linux / Android | `inotify` |
+| macOS | `FSEvents` (default) or `kqueue` |
+| Windows | `ReadDirectoryChangesW` |
+| FreeBSD 14.5+ (native build) | `inotify` |
+| FreeBSD (older) / NetBSD / OpenBSD / DragonflyBSD / iOS | `kqueue` |
+| All platforms (fallback) | `PollWatcher` |
+
+<Note>
+  On FreeBSD, `inotify` is selected automatically when building natively on 14.5 or later. When **cross-compiling** for FreeBSD 14.5+, you must explicitly enable the `freebsd_inotify` Cargo feature. See [Installation](/installation) for details.
+</Note>
+
+## Who Uses Notify
+
+Notify is a foundational dependency in many well-known Rust projects and developer tools:
+
+- **[Deno](https://github.com/denoland/deno)** — the JavaScript/TypeScript runtime
+- **[rust-analyzer](https://github.com/rust-analyzer/rust-analyzer)** — Rust language server
+- **[Zed](https://github.com/zed-industries/zed)** — high-performance code editor
+- **[mdBook](https://github.com/rust-lang-nursery/mdBook)** — Rust documentation builder
+- **[Alacritty](https://github.com/jwilm/alacritty)** — GPU-accelerated terminal emulator
+- **[cargo-watch](https://github.com/passcod/cargo-watch)** — re-run Cargo commands on file change
+- **[watchexec](https://github.com/mattgreen/watchexec)** — execute commands on filesystem change
+- **[watchfiles](https://watchfiles.helpmanual.io/)** — Python file-watching powered by Notify
+
+## Workspace Crates
+
+The Notify repository is a Cargo workspace. Each crate has a distinct role:
+
+| Crate | Purpose | License |
+|---|---|---|
+| `notify` | Core watcher library with native and poll backends | CC0-1.0 |
+| `notify-types` | Shared event and error types used across the workspace | MIT or Apache-2.0 |
+| `notify-debouncer-mini` | Lightweight debouncer — collapses rapid events into one | MIT or Apache-2.0 |
+| `notify-debouncer-full` | Full-featured debouncer with rename tracking and caching | MIT or Apache-2.0 |
+| `file-id` | Cross-platform stable file identity (inode / volume+file-index) | MIT or Apache-2.0 |
+
+<Tip>
+  If your application reacts to file saves (e.g. rebuilding on change, reloading config), prefer one of the debouncer crates over raw `notify`. Editors often write files in multiple rapid steps, and a debouncer collapses these into a single notification.
+</Tip>
+
+## Minimum Supported Rust Version
+
+Notify requires **Rust 1.88** or later. MSRV bumps do not require a major version release and may happen in minor releases, though support for the current stable Rust release and the two preceding stable releases (N, N-1, N-2) is always guaranteed.
+
+## License
+
+`notify` itself is released into the public domain under the [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/) license — you can use it without restriction in any project. All companion crates (`notify-types`, `notify-debouncer-mini`, `notify-debouncer-full`, `file-id`) are dual-licensed under **MIT or Apache-2.0**, consistent with the broader Rust ecosystem convention.
+
+## Origins
+
+Notify was inspired by Go's [fsnotify](https://github.com/fsnotify/fsnotify) and Node.js's [Chokidar](https://github.com/paulmillr/chokidar), born out of need for [cargo-watch](https://github.com/passcod/cargo-watch) and the general absence of a cross-platform filesystem notification library in C or Rust. It was originally created by [Félix Saparelli](https://passcod.name) and its many [contributors](https://github.com/notify-rs/notify/graphs/contributors).
+
+<Note>
+  Looking for **desktop** (system tray / balloon) notifications rather than filesystem events? You want [notify-rust](https://github.com/hoodie/notify-rust) or [alert-after](https://github.com/frewsxcv/alert-after) instead.
+</Note>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Watch a directory for changes in under five minutes with a working code example.
+  </Card>
+  <Card title="Installation" icon="box" href="/installation">
+    Add Notify to your `Cargo.toml` and configure feature flags for your target platform.
+  </Card>
+</CardGroup>

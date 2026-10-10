@@ -1,0 +1,310 @@
+---
+title: "notify-debouncer-mini: Simple Timeout-Based Event Debouncing"
+sidebarTitle: "Debouncer Mini"
+description: "Use notify-debouncer-mini to filter filesystem events and emit at most one event per file per timeout window. Covers new_debouncer(), Config, and DebouncedEvent."
+---
+
+`notify-debouncer-mini` wraps a `notify` watcher and filters the raw event stream down to at most one event per file path per timeout window. When a path is still being modified as the window expires, it emits an `AnyContinuous` event rather than `Any`, signalling that activity is ongoing. The API is intentionally small: one constructor function, one configuration struct, and one event type.
+
+## Installation
+
+Add the crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+notify-debouncer-mini = "0.6.0"
+```
+
+If you need to select specific `notify` features, declare `notify` explicitly alongside the debouncer:
+
+```toml
+[dependencies]
+notify-debouncer-mini = "0.6.0"
+notify = { version = "8", features = ["serde"] }
+```
+
+Otherwise, use the re-export: `use notify_debouncer_mini::notify::*`.
+
+## Quick start
+
+```rust
+use std::{path::Path, time::Duration};
+use notify_debouncer_mini::{notify::*, new_debouncer, DebounceEventResult};
+
+fn main() {
+    // Create a debounced watcher with a 2-second timeout.
+    // The closure is called at most once per path per timeout window.
+    let mut debouncer = new_debouncer(Duration::from_secs(2), |res: DebounceEventResult| {
+        match res {
+            Ok(events) => events.iter().for_each(|e| {
+                println!("Event {:?} for {:?}", e.kind, e.path)
+            }),
+            Err(e) => println!("Error {:?}", e),
+        }
+    }).unwrap();
+
+    // Watch the current directory recursively.
+    debouncer.watcher().watch(Path::new("."), RecursiveMode::Recursive).unwrap();
+
+    // Dropping `debouncer` here stops the background thread.
+    // In a real program, keep it alive with a loop or channel.
+}
+```
+
+<Note>
+Dropping the `Debouncer` guard stops the background debounce thread immediately. Keep the guard alive for as long as you need events — typically by holding it in a variable that outlives your event loop.
+</Note>
+
+## Core API
+
+### `new_debouncer`
+
+```rust
+pub fn new_debouncer<F: DebounceEventHandler>(
+    timeout: Duration,
+    event_handler: F,
+) -> Result<Debouncer<RecommendedWatcher>, Error>
+```
+
+Creates a debounced watcher using the platform's recommended backend. `timeout` is the debounce window: an event for a given path is held until no further events for that path arrive within `timeout`, or until the path has been continuously active for at least `timeout` (in which case `AnyContinuous` is emitted).
+
+For full control over the watcher backend and debounce configuration, use [`new_debouncer_opt`](#new_debouncer_opt).
+
+### `new_debouncer_opt`
+
+```rust
+pub fn new_debouncer_opt<F: DebounceEventHandler, T: Watcher>(
+    config: Config,
+    event_handler: F,
+) -> Result<Debouncer<T>, Error>
+```
+
+Creates a debounced watcher with an explicit backend type `T` and a `Config` struct. Use this when you need a specific watcher (`PollWatcher`, `INotifyWatcher`, etc.) or when you want to tune batch mode or pass a custom `notify::Config`.
+
+### `Debouncer`
+
+The returned guard exposes one method:
+
+```rust
+impl<T: Watcher> Debouncer<T> {
+    /// Access the underlying notify Watcher to call watch/unwatch.
+    pub fn watcher(&mut self) -> &mut dyn Watcher;
+}
+```
+
+The debouncer stops when the guard is dropped.
+
+## Event types
+
+### `DebouncedEvent`
+
+```rust
+pub struct DebouncedEvent {
+    /// The path that changed.
+    pub path: PathBuf,
+    /// Whether the activity has settled or is still ongoing.
+    pub kind: DebouncedEventKind,
+}
+```
+
+### `DebouncedEventKind`
+
+```rust
+pub enum DebouncedEventKind {
+    /// Activity on this path has settled — no events arrived within the timeout window.
+    Any,
+    /// Activity on this path is still ongoing — the path has been active for at least
+    /// one timeout period with no gap long enough to trigger `Any`.
+    AnyContinuous,
+}
+```
+
+<Tip>
+`AnyContinuous` is emitted when a file is being written to continuously (e.g. a log file or a long download). Use it to update a progress indicator or apply a longer secondary debounce, then wait for the final `Any` event before reacting fully.
+</Tip>
+
+### `DebounceEventResult`
+
+```rust
+pub type DebounceEventResult = Result<Vec<DebouncedEvent>, Error>;
+```
+
+Your handler receives either a batch of debounced events or a single `notify::Error`. Errors are delivered immediately — they are not debounced.
+
+## Configuration
+
+`Config` uses a builder pattern with sensible defaults:
+
+```rust
+use std::time::Duration;
+use notify_debouncer_mini::Config;
+
+let config = Config::default()
+    .with_timeout(Duration::from_secs(1))   // default: 500 ms
+    .with_batch_mode(true)                  // default: true
+    .with_notify_config(notify::Config::default());
+```
+
+| Method | Default | Description |
+|---|---|---|
+| `with_timeout(Duration)` | 500 ms | Debounce window. Events are held until no new event for the same path arrives within this duration. |
+| `with_batch_mode(bool)` | `true` | When `true`, events may be delayed by up to 2× the timeout and delivered together with others. When `false`, each event is delivered as soon as its own timeout expires. |
+| `with_notify_config(notify::Config)` | default | Passed verbatim to the underlying `notify` watcher backend. |
+
+<Note>
+With `batch_mode` enabled (the default), some events may be delayed by up to **2× the timeout**. Disable batch mode if you need the lowest possible latency at the cost of more frequent handler invocations.
+</Note>
+
+## Custom handler with `Config`
+
+The example below selects a `PollWatcher` backend and customises both the debounce timeout and the poll interval:
+
+```rust
+use std::{path::Path, time::Duration};
+use notify_debouncer_mini::{Config, new_debouncer_opt};
+
+fn main() {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // Configure the notify backend — here a poll interval of 1 second.
+    let backend_config = notify::Config::default()
+        .with_poll_interval(Duration::from_secs(1));
+
+    // Configure the debouncer itself.
+    let debouncer_config = Config::default()
+        .with_timeout(Duration::from_millis(1000))
+        .with_notify_config(backend_config);
+
+    // Select the PollWatcher backend explicitly via the type parameter.
+    let mut debouncer =
+        new_debouncer_opt::<_, notify::PollWatcher>(debouncer_config, tx).unwrap();
+
+    debouncer
+        .watcher()
+        .watch(Path::new("."), RecursiveMode::Recursive)
+        .unwrap();
+
+    for result in rx {
+        match result {
+            Ok(event) => println!("Event {event:?}"),
+            Err(error) => println!("Error {error:?}"),
+        }
+    }
+}
+```
+
+### Event filtering with `EventKindMask`
+
+Pass a custom `notify::Config` to reduce kernel-level noise. The `CORE` mask retains `Create`, `Remove`, `Modify(Data)`, `Modify(Metadata)`, and `Modify(Name)` while dropping noisy `Access` events:
+
+```rust
+use std::{path::Path, time::Duration};
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::{Config, new_debouncer_opt};
+
+fn main() {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let config = Config::default()
+        .with_timeout(Duration::from_secs(1))
+        .with_notify_config(
+            notify::Config::default().with_event_kinds(EventKindMask::CORE)
+        );
+
+    let mut debouncer =
+        new_debouncer_opt::<_, RecommendedWatcher>(config, tx).unwrap();
+
+    debouncer
+        .watcher()
+        .watch(Path::new("."), RecursiveMode::Recursive)
+        .unwrap();
+
+    for result in rx {
+        match result {
+            Ok(events) => events
+                .iter()
+                .for_each(|event| println!("Event {event:?}")),
+            Err(error) => println!("Error {error:?}"),
+        }
+    }
+}
+```
+
+## Implementing `DebounceEventHandler`
+
+Closures, `std::sync::mpsc::Sender`, and several async channel senders implement `DebounceEventHandler` out of the box (see feature flags below). You can also implement the trait on your own struct:
+
+```rust
+use notify_debouncer_mini::{DebounceEventHandler, DebounceEventResult};
+
+/// A handler that prints every debounced event.
+struct EventPrinter;
+
+impl DebounceEventHandler for EventPrinter {
+    fn handle_event(&mut self, event: DebounceEventResult) {
+        match event {
+            Ok(events) => {
+                for event in events {
+                    println!("Event {:?} for path {:?}", event.kind, event.path);
+                }
+            }
+            Err(error) => println!("Got error {:?}", error),
+        }
+    }
+}
+```
+
+<Warning>
+`DebounceEventHandler` is called from the debouncer's background thread. Keep handler logic fast and non-blocking. If you need to do heavy work, send events to another channel and process them on a dedicated thread.
+</Warning>
+
+## Channel senders as handlers
+
+The following sender types implement `DebounceEventHandler` directly — just pass the sender as the handler argument:
+
+| Type | Feature flag |
+|---|---|
+| `std::sync::mpsc::Sender<DebounceEventResult>` | *(always available)* |
+| `crossbeam_channel::Sender<DebounceEventResult>` | `crossbeam-channel` |
+| `flume::Sender<DebounceEventResult>` | `flume` |
+| `futures::channel::mpsc::UnboundedSender<DebounceEventResult>` | `futures` |
+| `tokio::sync::mpsc::UnboundedSender<DebounceEventResult>` | `tokio` |
+
+```rust
+use std::{path::Path, time::Duration};
+use notify_debouncer_mini::{notify::RecursiveMode, new_debouncer};
+
+let (tx, rx) = std::sync::mpsc::channel();
+let mut debouncer = new_debouncer(Duration::from_secs(1), tx).unwrap();
+debouncer.watcher().watch(Path::new("."), RecursiveMode::Recursive).unwrap();
+
+for result in rx {
+    match result {
+        Ok(events) => println!("{events:?}"),
+        Err(e) => eprintln!("{e:?}"),
+    }
+}
+```
+
+## Feature flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `macos_fsevent` | ✅ | Enable notify's FSEvents backend on macOS |
+| `macos_kqueue` | ❌ | Enable notify's kqueue backend on macOS |
+| `freebsd_inotify` | ❌ | Enable notify's inotify backend on FreeBSD 14.5+ (needed for cross-compilation) |
+| `serde` | ❌ | Enable serialization support for event types via `serde` |
+| `serialization-compat-6` | ❌ | Restore notify 6 serialization behaviour |
+| `crossbeam-channel` | ❌ | `crossbeam_channel::Sender` as a handler |
+| `flume` | ❌ | `flume::Sender` as a handler |
+| `futures` | ❌ | `futures::channel::mpsc::UnboundedSender` as a handler |
+| `tokio` | ❌ | `tokio::sync::mpsc::UnboundedSender` as a handler |
+
+<CardGroup cols={2}>
+  <Card title="Debouncing Overview" icon="book-open" href="/debouncing/overview">
+    Compare debouncer-mini and debouncer-full side by side.
+  </Card>
+  <Card title="Debouncer Full" icon="maximize" href="/debouncing/debouncer-full">
+    Rename stitching, duplicate suppression, and file ID tracking.
+  </Card>
+</CardGroup>

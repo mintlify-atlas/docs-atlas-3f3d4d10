@@ -1,0 +1,290 @@
+---
+title: "notify-debouncer-full: Smart Debouncing with Rename Stitching"
+sidebarTitle: "Debouncer Full"
+description: "notify-debouncer-full intelligently deduplicates filesystem events, stitches rename pairs, suppresses duplicate creates, and optionally tracks file IDs for stable identity."
+---
+
+`notify-debouncer-full` is the higher-fidelity debouncer in the notify ecosystem. Rather than collapsing all activity on a path into a single opaque event, it understands the *semantics* of filesystem operations and applies a set of smart rules that produce the minimal, correct event stream an application actually needs. The result is a `DebouncedEvent` that carries the full `notify::Event` — including event kind, paths, and attributes — together with the timestamp at which the event occurred.
+
+## What makes it "full"
+
+The debouncer applies the following rules before emitting any event:
+
+- **Rename stitching** — pairs a `Rename(From)` and `Rename(To)` into a single `Rename(Both)` event when the two can be matched by tracker ID or file system ID.
+- **Rename merging** — when multiple renames occur on the same path before the timeout expires, they are merged into a single rename spanning the original source and the final destination.
+- **Path updates for pending events** — if a rename is detected, all queued events for the old path are updated to reference the new path before being emitted.
+- **File ID tracking** — on macOS (FSEvents) and Windows, file system IDs are used to stitch renames even when the OS does not provide tracker IDs. Use `RecommendedCache` to enable this automatically.
+- **Single `Remove` for directory deletion** — when inotify reports a separate `Remove` event for every child file in a deleted directory, the debouncer collapses them into one event for the parent.
+- **No duplicate `Create`** — if a path already has a pending create in the queue, a second `Create` for the same path is dropped.
+- **No `Modify` after `Create`** — `Modify` events (data, metadata, or other) are suppressed for a path that was just created and has not yet been emitted.
+
+## Installation
+
+```toml
+[dependencies]
+notify-debouncer-full = "0.8.0-rc.2"
+```
+
+To pin specific `notify` feature flags, add `notify` explicitly:
+
+```toml
+[dependencies]
+notify-debouncer-full = "0.8.0-rc.2"
+notify = { version = "8", features = ["serde"] }
+```
+
+Otherwise, use the re-export: `use notify_debouncer_full::notify::*`.
+
+## Quick start
+
+```rust
+use notify_debouncer_full::{notify::*, new_debouncer, DebounceEventResult};
+use std::time::Duration;
+
+fn main() {
+    let mut debouncer = new_debouncer(
+        Duration::from_secs(2),
+        None, // tick rate — None lets notify pick 1/4 of the timeout
+        |result: DebounceEventResult| {
+            match result {
+                Ok(events) => events.iter().for_each(|event| println!("{event:?}")),
+                Err(errors) => errors.iter().for_each(|error| println!("{error:?}")),
+            }
+        },
+    ).unwrap();
+
+    // `debouncer.watch` is a convenience passthrough to the underlying watcher.
+    debouncer.watch(".", RecursiveMode::Recursive).unwrap();
+}
+```
+
+<Note>
+Dropping the `Debouncer` guard signals the background debounce thread to stop. Call `debouncer.stop()` if you need to block until the thread has fully exited, or `debouncer.stop_nonblocking()` to signal without waiting.
+</Note>
+
+## Core API
+
+### `new_debouncer`
+
+```rust
+pub fn new_debouncer<F: DebounceEventHandler>(
+    timeout: Duration,
+    tick_rate: Option<Duration>,
+    event_handler: F,
+) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, Error>
+```
+
+Creates a debounced watcher using the platform's recommended watcher backend and the recommended file ID cache. `timeout` is the debounce window. When `tick_rate` is `None`, notify selects a tick rate of `timeout / 4`.
+
+### `new_debouncer_opt`
+
+```rust
+pub fn new_debouncer_opt<F: DebounceEventHandler, T: Watcher, C: FileIdCache + Send + 'static>(
+    timeout: Duration,
+    tick_rate: Option<Duration>,
+    event_handler: F,
+    file_id_cache: C,
+    config: notify::Config,
+) -> Result<Debouncer<T, C>, Error>
+```
+
+Full control over every parameter. Supply an explicit watcher type `T`, a cache implementation `C`, and a `notify::Config` for the backend. Use this when you need a specific watcher (e.g. `INotifyWatcher`) or want to filter events at the kernel level with `EventKindMask`.
+
+<Warning>
+`tick_rate` must be less than or equal to `timeout`. Passing a `tick_rate` greater than `timeout` returns an `Err` immediately.
+</Warning>
+
+### `Debouncer` methods
+
+`Debouncer<T, C>` exposes the watcher interface directly — you no longer need to call `.watcher()` to watch paths:
+
+```rust
+// Watch a path (also registers it with the file ID cache).
+debouncer.watch("src/", RecursiveMode::Recursive)?;
+
+// Unwatch a path.
+debouncer.unwatch("src/")?;
+
+// List currently watched paths and their recursive modes.
+let paths = debouncer.watched_paths()?;
+
+// Add/remove multiple paths in a single call.
+use notify::PathOp;
+debouncer.update_paths([
+    PathOp::watch_recursive("src/"),
+    PathOp::unwatch("old/"),
+])?;
+
+// Pass a notify::Config option to the underlying watcher.
+debouncer.configure(notify::Config::default())?;
+
+// Stop the debouncer and wait for the background thread to exit.
+debouncer.stop();
+
+// Stop without waiting.
+debouncer.stop_nonblocking();
+```
+
+<Note>
+The `watcher()` and `cache()` methods are deprecated in the current version. Use the methods listed above directly on `Debouncer` instead.
+</Note>
+
+## Event types
+
+### `DebouncedEvent`
+
+```rust
+pub struct DebouncedEvent {
+    /// The full notify event, including kind, paths, and attributes.
+    pub event: notify::Event,
+
+    /// The time at which this event first occurred.
+    pub time: Instant, // std::time::Instant, or web_time::Instant with the `web-time` feature
+}
+```
+
+`DebouncedEvent` implements `Deref<Target = Event>` and `DerefMut`, so you can access `event.kind`, `event.paths`, and `event.attrs` directly on the debounced event without `.event.` prefixing.
+
+### `DebounceEventResult`
+
+```rust
+pub type DebounceEventResult = Result<Vec<DebouncedEvent>, Vec<Error>>;
+```
+
+Unlike `debouncer-mini`, errors are delivered as a `Vec<Error>` rather than a single `Error`. Both successes and errors are delivered from the same background thread on the same channel.
+
+## Cache types
+
+The cache records file system IDs so the debouncer can stitch rename pairs even when the OS only provides the source and destination as separate events.
+
+| Type | Description |
+|---|---|
+| `RecommendedCache` | Uses `FileIdMap` on macOS and Windows; falls back to `NoCache` on Linux, Android, and WASM |
+| `NoCache` | No file ID tracking. Rename stitching falls back to tracker IDs only |
+| `FileIdMap` | Explicit file ID map. Available on all non-WASM targets |
+
+All three implement the `FileIdCache` trait. You can implement `FileIdCache` on your own type to integrate an existing in-process cache:
+
+```rust
+use file_id::FileId;
+use notify::RecursiveMode;
+use notify_debouncer_full::FileIdCache;
+use std::path::{Path, PathBuf};
+
+struct MyCache { /* ... */ }
+
+impl FileIdCache for MyCache {
+    fn cached_file_id(&self, path: &Path) -> Option<impl AsRef<FileId>> {
+        // Return the cached ID for `path`, or None if not cached.
+        Option::<&FileId>::None
+    }
+
+    fn add_path(&mut self, path: &Path, recursive_mode: RecursiveMode) {
+        // Called when a new path is created or overwritten.
+    }
+
+    fn remove_path(&mut self, path: &Path) {
+        // Called when a path is deleted.
+    }
+}
+```
+
+## Advanced example: event filtering with `new_debouncer_opt`
+
+The example below uses `new_debouncer_opt` to select an explicit watcher backend, pass a custom `notify::Config` that drops noisy access events via `EventKindMask::CORE`, and use `RecommendedCache` for rename stitching:
+
+```rust
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
+use std::time::Duration;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // CORE mask: CREATE, REMOVE, MODIFY_DATA, MODIFY_META, MODIFY_NAME.
+    // Drops OPEN/CLOSE/ACCESS events before they even reach the debouncer.
+    let notify_config = notify::Config::default()
+        .with_event_kinds(EventKindMask::CORE);
+
+    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
+        Duration::from_secs(2), // debounce timeout
+        None,                   // tick rate — None = timeout / 4
+        tx,
+        RecommendedCache::new(),
+        notify_config,
+    )?;
+
+    debouncer.watch(".", RecursiveMode::Recursive)?;
+
+    for result in rx {
+        match result {
+            Ok(events) => events.iter().for_each(|event| println!("{event:?}")),
+            Err(errors) => errors.iter().for_each(|error| println!("{error:?}")),
+        }
+    }
+
+    Ok(())
+}
+```
+
+## Implementing `DebounceEventHandler`
+
+Closures, `std::sync::mpsc::Sender`, and several async channel senders implement `DebounceEventHandler` out of the box. You can also implement the trait on your own struct:
+
+```rust
+use notify_debouncer_full::{DebounceEventHandler, DebounceEventResult};
+
+/// A handler that prints every debounced event.
+struct EventPrinter;
+
+impl DebounceEventHandler for EventPrinter {
+    fn handle_event(&mut self, result: DebounceEventResult) {
+        match result {
+            Ok(events) => events.iter().for_each(|event| println!("{event:?}")),
+            Err(errors) => errors.iter().for_each(|error| println!("{error:?}")),
+        }
+    }
+}
+```
+
+<Warning>
+`DebounceEventHandler` is called from the debouncer's background thread. Keep handler logic fast and non-blocking. Send events to a separate channel if you need to do heavy processing.
+</Warning>
+
+## Channel senders as handlers
+
+| Type | Feature flag |
+|---|---|
+| `std::sync::mpsc::Sender<DebounceEventResult>` | *(always available)* |
+| `crossbeam_channel::Sender<DebounceEventResult>` | `crossbeam-channel` |
+| `flume::Sender<DebounceEventResult>` | `flume` |
+| `futures::channel::mpsc::UnboundedSender<DebounceEventResult>` | `futures` |
+| `tokio::sync::mpsc::UnboundedSender<DebounceEventResult>` | `tokio` |
+
+## Feature flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `macos_fsevent` | ✅ | Enable notify's FSEvents backend on macOS |
+| `macos_kqueue` | ❌ | Enable notify's kqueue backend on macOS |
+| `freebsd_inotify` | ❌ | Enable notify's inotify backend on FreeBSD 14.5+ (needed for cross-compilation) |
+| `serde` | ❌ | Enable serialization support for event types via `serde` |
+| `web-time` | ❌ | Use `web_time::Instant` for `DebouncedEvent::time` (for WASM targets) |
+| `serialization-compat-6` | ❌ | Restore notify 6 serialization behaviour |
+| `crossbeam-channel` | ❌ | `crossbeam_channel::Sender` as a handler |
+| `flume` | ❌ | `flume::Sender` as a handler |
+| `futures` | ❌ | `futures::channel::mpsc::UnboundedSender` as a handler |
+| `tokio` | ❌ | `tokio::sync::mpsc::UnboundedSender` as a handler |
+
+<Tip>
+On Linux and Android, `RecommendedCache` resolves to `NoCache` because inotify provides reliable tracker IDs for rename stitching without needing to read file IDs from disk. File ID tracking is only needed on macOS (FSEvents) and Windows where tracker IDs are not always available.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Debouncing Overview" icon="book-open" href="/debouncing/overview">
+    Compare debouncer-mini and debouncer-full side by side.
+  </Card>
+  <Card title="Debouncer Mini" icon="minimize" href="/debouncing/debouncer-mini">
+    Simple timeout-based deduplication with minimal API surface.
+  </Card>
+</CardGroup>

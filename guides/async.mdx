@@ -1,0 +1,294 @@
+---
+title: "Using Notify with Async Runtimes: Tokio and Futures"
+sidebarTitle: "Async"
+description: "Integrate Notify with async Rust runtimes using tokio::sync::mpsc, futures channels, crossbeam-channel, or flume as drop-in EventHandler implementations."
+---
+
+Notify's `EventHandler` trait is intentionally lightweight: any type that can receive a `Result<Event>` can act as a handler. Several popular channel types already implement `EventHandler` out of the box, so you can pass a channel sender directly to `recommended_watcher()` or `RecommendedWatcher::new()` without writing any glue code. This page covers each supported channel family — from the standard library default to Tokio, futures, crossbeam, and flume — and shows how to write a fully custom handler when none of those fit.
+
+## The `EventHandler` Trait
+
+`EventHandler` is the core abstraction for receiving events from a watcher:
+
+```rust
+pub trait EventHandler: Send + 'static {
+    fn handle_event(&mut self, event: Result<Event>);
+}
+```
+
+Because it is `Send + 'static`, the watcher can call it from an internal OS-level thread. Any closure of the right type, or channel sender, satisfies this bound. Errors (e.g. an inotify limit being reached) are delivered through the same channel as successful events, so always match on `Result<Event>` rather than unwrapping.
+
+<Note>
+  Notify watcher threads are **blocking** OS threads, not async tasks. The `handle_event` call happens on that blocking thread. If you integrate with an async executor, bridge the call with `spawn_blocking` or use a channel whose sender is safe to call from synchronous contexts (all of the options below are).
+</Note>
+
+---
+
+## Default: `std::sync::mpsc`
+
+Without any extra features, `std::sync::mpsc::Sender<Result<Event>>` implements `EventHandler`. This is the lowest-overhead option and works everywhere:
+
+```rust
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::{path::Path, sync::mpsc};
+
+fn main() -> Result<()> {
+    let (tx, rx) = mpsc::channel::<Result<Event>>();
+
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e)    => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## Tokio (`tokio` feature)
+
+Enable the `tokio` feature to use `tokio::sync::mpsc::UnboundedSender<Result<Event>>` as an `EventHandler`:
+
+```toml
+# Cargo.toml
+[dependencies]
+notify = { version = "9.0.0-rc.5", features = ["tokio"] }
+tokio  = { version = "1", features = ["full"] }
+```
+
+```rust
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+use std::path::Path;
+
+#[tokio::main]
+async fn main() -> notify::Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut watcher = recommended_watcher(tx)?;
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    while let Some(res) = rx.recv().await {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e)    => println!("error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+<Tip>
+  `tokio::sync::mpsc::unbounded_channel()` is the right choice here because `handle_event` is called synchronously from a blocking thread; using the bounded `channel()` variant can deadlock if the async receiver is not polling fast enough.
+</Tip>
+
+---
+
+## Futures (`futures` feature)
+
+The `futures` feature enables two `EventHandler` implementations:
+
+- `futures::channel::mpsc::UnboundedSender<Result<Event>>` — non-blocking send, usable from sync contexts.
+- The bounded `futures::channel::mpsc::Sender` does **not** implement `EventHandler` directly, but can be bridged manually (see example below).
+
+```toml
+[dependencies]
+notify  = { version = "9.0.0-rc.5", features = ["futures"] }
+futures = "0.3"
+```
+
+### Unbounded sender (simplest)
+
+```rust
+use futures::StreamExt;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+
+#[tokio::main]
+async fn main() -> notify::Result<()> {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+
+    let mut watcher = recommended_watcher(tx)?;
+    watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+
+    while let Some(res) = rx.next().await {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e)    => println!("error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+### Bounded sender with `block_on` bridge
+
+When you need backpressure from a bounded `futures` channel, bridge the blocking `handle_event` call using `futures::executor::block_on`. This is the approach used in the `async_monitor` example in the Notify repository:
+
+```rust
+use futures::{SinkExt, StreamExt, channel::mpsc::{Receiver, channel}};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+
+fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Result<Event>>)> {
+    let (mut tx, rx) = channel(1);
+
+    // Automatically select the best implementation for your platform.
+    // You can also access each implementation directly e.g. INotifyWatcher.
+    let watcher = RecommendedWatcher::new(
+        move |res| {
+            futures::executor::block_on(async {
+                tx.send(res).await.unwrap();
+            })
+        },
+        Config::default(),
+    )?;
+
+    Ok((watcher, rx))
+}
+
+async fn async_watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let (mut watcher, mut rx) = async_watcher()?;
+
+    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+
+    while let Some(res) = rx.next().await {
+        match res {
+            Ok(event) => println!("changed: {:?}", event),
+            Err(e)    => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+<Warning>
+  `futures::executor::block_on` will block the watcher's OS thread until the async receiver polls the channel. If your async task is busy or the channel is full, this stalls event delivery for all other watched paths. For high-throughput use cases, prefer an unbounded channel or increase the channel capacity.
+</Warning>
+
+---
+
+## crossbeam-channel (`crossbeam-channel` feature)
+
+```toml
+[dependencies]
+notify            = { version = "9.0.0-rc.5", features = ["crossbeam-channel"] }
+crossbeam-channel = "0.5"
+```
+
+`crossbeam_channel::Sender<Result<Event>>` implements `EventHandler`. Both bounded and unbounded variants of `crossbeam_channel::channel` / `crossbeam_channel::bounded` work; use the unbounded variant to avoid blocking the watcher thread:
+
+```rust
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+
+fn main() -> notify::Result<()> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+
+    let mut watcher = recommended_watcher(tx)?;
+    watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e)    => println!("error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## flume (`flume` feature)
+
+`flume` provides a single channel type that works as both bounded and unbounded and is compatible with async `.recv_async()`:
+
+```toml
+[dependencies]
+notify = { version = "9.0.0-rc.5", features = ["flume"] }
+flume  = "0.11"
+```
+
+```rust
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+
+#[tokio::main]
+async fn main() -> notify::Result<()> {
+    let (tx, rx) = flume::unbounded();
+
+    let mut watcher = recommended_watcher(tx)?;
+    watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+
+    while let Ok(res) = rx.recv_async().await {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e)    => println!("error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## Feature Flags Summary
+
+| Feature | `EventHandler` impl | Channel kind |
+|---|---|---|
+| *(default, no extra features)* | `std::sync::mpsc::Sender<Result<Event>>` | Standard library MPSC |
+| `tokio` | `tokio::sync::mpsc::UnboundedSender<Result<Event>>` | Tokio unbounded MPSC |
+| `futures` | `futures::channel::mpsc::UnboundedSender<Result<Event>>` | Futures unbounded MPSC |
+| `crossbeam-channel` | `crossbeam_channel::Sender<Result<Event>>` | crossbeam unbounded or bounded |
+| `flume` | `flume::Sender<Result<Event>>` | flume (sync + async) |
+
+Multiple features can be enabled simultaneously; each channel type gets its own `EventHandler` implementation.
+
+---
+
+## Custom `EventHandler`
+
+When none of the channel types fit your design — for example, you want to write events to a log, update shared state, or route to multiple consumers — implement `EventHandler` directly:
+
+```rust
+use notify::{Event, EventHandler, Result};
+
+/// Prints events and counts errors.
+struct LoggingHandler {
+    error_count: u64,
+}
+
+impl EventHandler for LoggingHandler {
+    fn handle_event(&mut self, event: Result<Event>) {
+        match event {
+            Ok(ev) => println!("[notify] event: {:?}", ev),
+            Err(e) => {
+                self.error_count += 1;
+                eprintln!("[notify] error #{}: {:?}", self.error_count, e);
+            }
+        }
+    }
+}
+
+fn main() -> notify::Result<()> {
+    let handler = LoggingHandler { error_count: 0 };
+    let mut watcher = notify::recommended_watcher(handler)?;
+    watcher.watch(std::path::Path::new("."), notify::RecursiveMode::Recursive)?;
+
+    // block the main thread
+    std::thread::park();
+    Ok(())
+}
+```
+
+<Note>
+  Because `handle_event` takes `&mut self`, you have exclusive access to any state stored in your handler. No locking is needed inside the handler — Notify guarantees sequential calls.
+</Note>

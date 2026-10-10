@@ -1,0 +1,202 @@
+---
+title: "file-id: Stable File Identity via Inode and File IDs"
+sidebarTitle: "file-id"
+description: "Reference for the file-id crate: get_file_id(), get_file_id_no_follow(), and the FileId enum with Inode, LowRes, and HighRes variants for stable file identification."
+---
+
+`file-id` is a small utility crate for reading the low-level, OS-assigned identifiers that uniquely name a file on a single computer. On Linux and macOS these are called *inode numbers*; on Windows they are called *file IDs* or *file indexes*. Combined with a device ID (Unix) or volume serial number (Windows), a `FileId` lets you reliably detect whether two paths refer to the same underlying file — even across renames — without relying on the path itself.
+
+## Installation
+
+```toml
+[dependencies]
+file-id = "0.2.3"
+```
+
+<Note>
+  `file-id` is also re-exported as `notify_debouncer_full::file_id`, so if you are already using `notify-debouncer-full` you can access it without a separate dependency.
+</Note>
+
+---
+
+## Functions
+
+### `get_file_id`
+
+```rust
+pub fn get_file_id(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Returns the [`FileId`](#fileid) for the file or directory at `path`. On Unix this calls `fs::metadata` which **follows symbolic links**, returning the inode of the link target. On Windows it opens the file with `GetFileInformationByHandleEx` (falling back to `GetFileInformationByHandle`) and follows reparse points.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file or directory to identify. The path must exist and be accessible.
+</ParamField>
+
+Returns `Ok(FileId)` on success, or an `io::Error` if the path does not exist or cannot be opened.
+
+---
+
+### `get_file_id_no_follow`
+
+```rust
+pub fn get_file_id_no_follow(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Like `get_file_id`, but does **not** follow symbolic links or reparse points. On Unix this uses `fs::symlink_metadata`; on Windows the file is opened with `FILE_FLAG_OPEN_REPARSE_POINT` so the ID of the link itself is returned rather than its target.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file, directory, or symlink to identify.
+</ParamField>
+
+---
+
+### Windows-only functions
+
+The following functions are only compiled on `target_family = "windows"` and let you request a specific resolution variant explicitly.
+
+#### `get_low_res_file_id`
+
+```rust
+#[cfg(target_family = "windows")]
+pub fn get_low_res_file_id(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Opens the file and calls `GetFileInformationByHandle` to obtain a [`FileId::LowRes`](#lowres) identifier. Available on Windows XP and above.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file or directory. Follows reparse points.
+</ParamField>
+
+#### `get_high_res_file_id`
+
+```rust
+#[cfg(target_family = "windows")]
+pub fn get_high_res_file_id(path: impl AsRef<Path>) -> io::Result<FileId>
+```
+
+Opens the file and calls `GetFileInformationByHandleEx` with `FileIdInfo` to obtain a [`FileId::HighRes`](#highres) identifier. Available on Windows Vista and above.
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to the file or directory. Follows reparse points.
+</ParamField>
+
+<Tip>
+  `get_file_id` on Windows automatically tries the high-resolution variant first and falls back to low-resolution, so you normally do not need to call these platform-specific functions directly.
+</Tip>
+
+---
+
+## Types
+
+### `FileId`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FileId {
+    Inode { device_id: u64, inode_number: u64 },
+    LowRes { volume_serial_number: u32, file_index: u64 },
+    HighRes { volume_serial_number: u64, file_id: u128 },
+}
+```
+
+A platform-specific unique file identifier. Two `FileId` values that are equal represent the same underlying file **on the same computer at the time they were read**.
+
+#### `Inode`
+
+Returned on Linux and macOS.
+
+<ResponseField name="device_id" type="u64">
+  The ID of the block device (or pseudo-device) on which the file resides. Corresponds to the `dev` field of `stat(2)`.
+</ResponseField>
+
+<ResponseField name="inode_number" type="u64">
+  The inode number. Unique within a single device. Corresponds to the `ino` field of `stat(2)`.
+</ResponseField>
+
+#### `LowRes`
+
+Returned on Windows XP and above via `GetFileInformationByHandle`. Stores only the lower 64 bits of the file index.
+
+<ResponseField name="volume_serial_number" type="u32">
+  Identifies the volume (partition) on which the file resides.
+</ResponseField>
+
+<ResponseField name="file_index" type="u64">
+  The 64-bit file index (lower bits of the NTFS file reference number).
+</ResponseField>
+
+#### `HighRes`
+
+Returned on Windows Vista and above via `GetFileInformationByHandleEx`. Stores the full 128-bit file ID.
+
+<ResponseField name="volume_serial_number" type="u64">
+  Identifies the volume on which the file resides.
+</ResponseField>
+
+<ResponseField name="file_id" type="u128">
+  The full 128-bit file ID from `FILE_ID_INFO`.
+</ResponseField>
+
+#### Constructors
+
+```rust
+pub fn new_inode(device_id: u64, inode_number: u64) -> Self
+pub fn new_low_res(volume_serial_number: u32, file_index: u64) -> Self
+pub fn new_high_res(volume_serial_number: u64, file_id: u128) -> Self
+```
+
+Convenience constructors for each variant. Primarily useful in tests and custom `FileIdCache` implementations.
+
+---
+
+## Usage Example
+
+```rust
+// Cross-platform: follows symlinks
+let file = tempfile::NamedTempFile::new().unwrap();
+let file_id = file_id::get_file_id(file.path()).unwrap();
+println!("{file_id:?}");
+
+// Without following symlinks:
+let file_id = file_id::get_file_id_no_follow(file.path()).unwrap();
+println!("{file_id:?}");
+```
+
+### Windows-only example
+
+```rust
+// Low-resolution ID (Windows XP+)
+let file_id = file_id::get_low_res_file_id(file.path()).unwrap();
+println!("{file_id:?}");
+
+// High-resolution ID (Windows Vista+)
+let file_id = file_id::get_high_res_file_id(file.path()).unwrap();
+println!("{file_id:?}");
+```
+
+---
+
+## Important Caveats
+
+<Warning>
+  File IDs **may be reused** after a file is deleted. If a new file is created in the gap between reading an ID and acting on it, you may incorrectly conclude that two different files are the same. For most use-cases (rename tracking within a short debounce window) this is not a practical concern, but it is worth keeping in mind for long-lived caches.
+</Warning>
+
+<Warning>
+  File IDs are unique **on a single computer only**. An inode number copied to a remote host, or a file index from an NFS share, is not guaranteed to be unique in that wider context.
+</Warning>
+
+---
+
+## Relationship to notify-debouncer-full
+
+`notify-debouncer-full` uses `file-id` internally through its `FileIdMap` and `FileIdCache` mechanism. When a `Rename From` event arrives, the debouncer records the `FileId` of the source path. When the matching `Rename To` event arrives, it reads the `FileId` of the destination and compares — if they match, the two events are stitched into a single `Rename(Both)` event. This is especially important on macOS (FSEvents) and Windows, where the OS does not provide a reliable tracker cookie linking the two halves of a rename.
+
+---
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `serde` | | Derives `Serialize` and `Deserialize` for `FileId` via the `serde` crate |

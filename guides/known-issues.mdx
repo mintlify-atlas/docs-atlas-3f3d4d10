@@ -1,0 +1,398 @@
+---
+title: "Known Issues and Platform Quirks in Notify"
+sidebarTitle: "Known Issues"
+description: "Comprehensive guide to Notify's known limitations by platform: network filesystems, Docker M1, FSEvents security, editor behavior, /proc, inotify limits, and more."
+---
+
+Notify strives to present a uniform filesystem-watching API across all supported platforms, but each platform's underlying notification mechanism has its own quirks, limits, and blind spots. This page documents every known issue, explains why it happens, and gives you a concrete workaround for each one. Expand an entry to read the full details.
+
+<Accordion title="Network Filesystems (NFS, SSHFS, SMB)">
+
+**Platforms affected:** All
+
+Network-mounted filesystems such as NFS and SSHFS do not relay kernel-level file notification events to the client machine. When a file changes on the server, the client's inotify, FSEvents, or kqueue subscription never fires — from the OS's perspective nothing happened locally.
+
+**Symptoms:**
+- No events are emitted after creating, modifying, or deleting files on the mount.
+- The watcher starts and runs without error, but the channel stays silent.
+
+**Workaround:**
+
+Use `PollWatcher` instead of `RecommendedWatcher`. Polling works by scanning the filesystem directly, so it does not depend on the OS delivering notifications:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(5));
+
+let (tx, rx) = std::sync::mpsc::channel();
+let mut watcher = PollWatcher::new(tx, config)?;
+watcher.watch(Path::new("/mnt/nfs/share"), RecursiveMode::Recursive)?;
+```
+
+See the [Poll Watcher guide](/guides/poll-watcher) for full configuration details.
+
+</Accordion>
+
+<Accordion title="WSL Programs Watching Windows Paths">
+
+**Platforms affected:** Windows Subsystem for Linux (WSL)
+
+When a program running inside WSL watches a path on the Windows host (e.g. `/mnt/c/...`), it cannot use `ReadDirectoryChangesW` — the Win32 API is not available through the WSL guest's filesystem layer. This is tracked in [issue #254](https://github.com/notify-rs/notify/issues/254).
+
+**Symptoms:**
+- The watcher may fail to start, or start but never deliver events, for paths under `/mnt/c/` or similar Windows mounts.
+
+**Workaround:**
+
+Manually instantiate `PollWatcher` instead of `RecommendedWatcher`:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(3));
+
+let (tx, rx) = std::sync::mpsc::channel();
+let mut watcher = PollWatcher::new(tx, config)?;
+watcher.watch(Path::new("/mnt/c/Users/me/projects"), RecursiveMode::Recursive)?;
+```
+
+</Accordion>
+
+<Accordion title="Docker with Linux on macOS M1 (os error 38)">
+
+**Platforms affected:** macOS Apple Silicon (M1/M2/M3) running Docker with Linux containers
+
+Docker on macOS M1 runs Linux containers inside an emulation layer. The native FSEvents backend is not available inside that environment and throws the error:
+
+```
+Function not implemented (os error 38)
+```
+
+This is tracked in [issue #423](https://github.com/notify-rs/notify/issues/423).
+
+**Symptoms:**
+- `RecommendedWatcher::new(...)` or `recommended_watcher(...)` returns `Err` with OS error 38.
+- Occurs inside any Dockerized Rust application running on M1 macOS hosts.
+
+**Workaround:**
+
+Detect the error at startup and fall back to `PollWatcher`:
+
+```rust
+use notify::{Config, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration, sync::mpsc};
+
+fn make_watcher(
+    tx: mpsc::Sender<notify::Result<notify::Event>>,
+) -> notify::Result<Box<dyn Watcher>> {
+    let config = Config::default()
+        .with_poll_interval(Duration::from_secs(2));
+
+    match RecommendedWatcher::new(tx.clone(), config) {
+        Ok(w) => Ok(Box::new(w)),
+        Err(_) => Ok(Box::new(PollWatcher::new(tx, config)?)),
+    }
+}
+```
+
+Alternatively, unconditionally use `PollWatcher` when you know your deployment target is inside Docker on M1.
+
+</Accordion>
+
+<Accordion title="macOS FSEvents and Unowned Files">
+
+**Platforms affected:** macOS (FSEvents backend)
+
+FSEvents enforces a security model described in [Apple's FileSystemEventSecurity documentation](https://developer.apple.com/library/mac/documentation/Darwin/Conceptual/FSEvents_ProgGuide/FileSystemEventSecurity/FileSystemEventSecurity.html). Some events for files that do not belong to the current user cannot be observed, even with full disk access granted.
+
+**Symptoms:**
+- Events for files owned by another user (e.g. system daemons, other accounts) are silently dropped.
+- The watcher starts without error but misses changes to those specific paths.
+
+**Workaround:**
+
+Switch to `PollWatcher` for those paths. Polling reads the filesystem directly and is not subject to FSEvents security restrictions:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(10));
+
+let (tx, rx) = std::sync::mpsc::channel();
+let mut watcher = PollWatcher::new(tx, config)?;
+watcher.watch(Path::new("/Library/Application Support/SomeDaemon"), RecursiveMode::NonRecursive)?;
+```
+
+There is a slight performance cost compared to FSEvents, but polling is reliable regardless of file ownership.
+
+</Accordion>
+
+<Accordion title="macOS / APFS: std::fs::copy Triggers Events on the Source Path">
+
+**Platforms affected:** macOS with APFS volumes
+
+On APFS, `std::fs::copy` may internally use `fclonefileat` / `clonefile` for copy-on-write cloning. This operation updates inode metadata on the **source** file. FSEvents observes the metadata change and reports it as a `MODIFY_META` event on the source path — even though the source file's content was not modified.
+
+This is tracked in [issue #259](https://github.com/notify-rs/notify/issues/259) and [issue #465](https://github.com/notify-rs/notify/issues/465).
+
+**Symptoms:**
+- After calling `std::fs::copy(src, dst)`, you receive an unexpected metadata-change event on `src`, not just a creation event on `dst`.
+- Applications that filter events by path or type may incorrectly treat the source file as modified.
+
+**Workarounds:**
+
+Option 1 — Replace `std::fs::copy` with `std::io::copy`:
+
+```rust
+use std::{fs::File, io};
+
+fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    let mut src_file = File::open(src)?;
+    let mut dst_file = File::create(dst)?;
+    io::copy(&mut src_file, &mut dst_file)?;
+    Ok(())
+}
+```
+
+Option 2 — Exclude metadata events from your watcher config using `EventKindMask`:
+
+```rust
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
+
+// Receive data changes and renames, but not metadata-only events
+let config = Config::default().with_event_kinds(
+    EventKindMask::CREATE | EventKindMask::REMOVE | EventKindMask::MODIFY_DATA | EventKindMask::MODIFY_NAME
+);
+let (tx, rx) = std::sync::mpsc::channel();
+let mut watcher = RecommendedWatcher::new(tx, config)?;
+```
+
+See the [Event Filtering guide](/guides/event-filtering) for more detail on `EventKindMask`.
+
+</Accordion>
+
+<Accordion title="Editor Behaviour: Truncate-and-Write vs Create-and-Replace">
+
+**Platforms affected:** All
+
+Different text editors save files in different ways. The exact sequence of events you receive depends on the editor, not on Notify:
+
+| Strategy | Typical events |
+|---|---|
+| **Truncate-and-write** (e.g. `nano`, `echo > file`) | `MODIFY_DATA` on the existing path |
+| **Create-temp-then-rename** (e.g. `vim`, `emacs`, many IDEs) | `CREATE` (temp file) → `MODIFY_NAME` (rename over original) → `REMOVE` (temp) |
+| **Delete-then-create** (some editors) | `REMOVE` followed by `CREATE` |
+
+Because there is no universal strategy, matching only on `EventKind::Modify(ModifyKind::Data(_))` will miss saves from editors that use rename-based writes, and matching on `EventKind::Create` will trigger false positives from temporary files.
+
+**Recommendation:**
+
+Match on a broad set of event kinds and deduplicate or debounce in your application logic:
+
+```rust
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
+use notify::{Event, Result};
+
+fn handle(res: Result<Event>) {
+    let event = match res {
+        Ok(e) => e,
+        Err(e) => { eprintln!("error: {:?}", e); return; }
+    };
+
+    let is_relevant = matches!(
+        event.kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(RenameMode::To))
+    );
+
+    if is_relevant {
+        println!("file changed: {:?}", event.paths);
+    }
+}
+```
+
+For production use, `notify-debouncer-full` or `notify-debouncer-mini` coalesce the burst of events from a single save into one debounced notification.
+
+</Accordion>
+
+<Accordion title="Parent Folder Deletion">
+
+**Platforms affected:** All
+
+If you watch the path `/a/b` and the directory `/a/b` is deleted, you will **not** receive a `REMOVE` event for `/a/b`. The event is emitted on the parent directory `/a`, which reports that one of its children disappeared.
+
+This is a fundamental property of how filesystem notifications work: events for a path are delivered to the nearest watched ancestor.
+
+**Workaround:**
+
+To receive a deletion event for `/a/b`, also watch `/a` with at least `RecursiveMode::NonRecursive`:
+
+```rust
+use notify::{RecursiveMode, Watcher, recommended_watcher};
+
+let mut watcher = recommended_watcher(|res| println!("{res:?}"))?;
+
+// Watch the parent so you get notified when /a/b is removed
+watcher.watch(std::path::Path::new("/a"), RecursiveMode::NonRecursive)?;
+// Also watch /a/b itself for changes within it
+watcher.watch(std::path::Path::new("/a/b"), RecursiveMode::Recursive)?;
+```
+
+See [issue #403](https://github.com/notify-rs/notify/issues/403) for further discussion.
+
+</Accordion>
+
+<Accordion title="Pseudo-Filesystems: /proc and /sys">
+
+**Platforms affected:** Linux (and other Unix-likes with virtual filesystems)
+
+Virtual filesystems like `/proc` and `/sys` on Linux are generated by the kernel on demand. Files in these directories often:
+
+- Always report `mtime` of zero or the system boot time, regardless of when their content last changed.
+- Always report a file size of zero, even though they return content when read.
+- Never trigger inotify notifications, because writes go to the kernel subsystem, not a real storage device.
+
+As a result, both the inotify backend and an unconfigured `PollWatcher` (which compares only `mtime`) will miss all changes.
+
+**Workaround:**
+
+Use `PollWatcher` with `with_compare_contents(true)`. This reads and hashes the file's content at each poll cycle, detecting changes regardless of metadata accuracy:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_compare_contents(true)   // detect changes by content hash
+    .with_poll_interval(Duration::from_secs(2));
+
+let (tx, rx) = std::sync::mpsc::channel();
+let mut watcher = PollWatcher::new(tx, config)?;
+
+// Example: watch loopback interface transmit byte counter
+watcher.watch(
+    Path::new("/sys/class/net/lo/statistics/tx_bytes"),
+    RecursiveMode::NonRecursive,
+)?;
+
+for res in rx {
+    match res {
+        Ok(event) => println!("changed: {:?}", event),
+        Err(e)    => println!("watch error: {:?}", e),
+    }
+}
+```
+
+</Accordion>
+
+<Accordion title="Linux: Bad File Descriptor / No Space Left on Device (inotify limits)">
+
+**Platforms affected:** Linux, Android
+
+On Linux, the inotify backend creates one kernel watch descriptor per file and directory. Two system-wide per-user limits control how many descriptors can be created:
+
+- `fs.inotify.max_user_instances` — maximum number of inotify instances per user (each `INotifyWatcher` counts as one instance).
+- `fs.inotify.max_user_watches` — maximum number of watch descriptors across all instances for a user. For recursive watches, every file **and** directory inside the watched tree counts towards this limit.
+
+When these limits are exceeded, the watcher returns errors like:
+```
+Bad file descriptor (os error 9)
+No space left on device (os error 28)
+```
+
+**Workaround — increase the limits:**
+
+```sh
+# Increase max inotify instances (adjust the number to your needs)
+sudo sysctl fs.inotify.max_user_instances=8192
+
+# Increase max inotify watches
+sudo sysctl fs.inotify.max_user_watches=524288
+
+# Make the changes persistent across reboots
+sudo sysctl -p
+```
+
+To make these settings permanent, add them to `/etc/sysctl.conf` or a file under `/etc/sysctl.d/`:
+
+```sh
+echo "fs.inotify.max_user_watches=524288" | sudo tee /etc/sysctl.d/99-inotify.conf
+echo "fs.inotify.max_user_instances=8192" | sudo tee -a /etc/sysctl.d/99-inotify.conf
+```
+
+**Workaround — use `PollWatcher`:**
+
+`PollWatcher` does not use inotify and is therefore not subject to these limits at all. If your users cannot increase the system limits, `PollWatcher` is a reliable fallback.
+
+<Note>
+  Containers (Docker, LXC) often share the host's inotify limits. If you're running inside a container with a restricted inotify quota, the limits above need to be changed on the **host**, not inside the container.
+</Note>
+
+</Accordion>
+
+<Accordion title="Watching Large Directories (Linux reliability)">
+
+**Platforms affected:** Linux (inotify)
+
+The Linux inotify backend is not guaranteed to be 100% reliable when watching very large numbers of files. Under high I/O load, inotify can overflow its internal event queue, and events that overflow are silently dropped. This is a kernel-level limitation, not specific to Notify. See [issue #412](https://github.com/notify-rs/notify/issues/412) for discussion.
+
+**Symptoms:**
+- Occasional missed events in directories with thousands of actively changing files.
+- No errors reported; events are simply not delivered.
+
+**Mitigations:**
+
+- Narrow the scope of your watch to the smallest subtree that matters.
+- Increase the inotify event queue size (requires kernel recompilation or a privileged tuning parameter not exposed through `sysctl`).
+- Use `PollWatcher` for a guaranteed-complete (if slower) view of changes.
+- Accept some missed events and re-scan periodically as a consistency check.
+
+</Accordion>
+
+<Accordion title="Watching Many Independent Paths on macOS (O(N²) FSEvents rebuilds)">
+
+**Platforms affected:** macOS (FSEvents backend)
+
+The FSEvents backend builds a single stream that covers all registered paths. Each call to `Watcher::watch()` for a path that is not already covered by an existing recursive watch on the same volume **rebuilds the entire stream**. If you call `watch()` N times for N independent paths, FSEvents performs an O(N²) total path registration: the stream is rebuilt N times, and each rebuild includes all previously added paths.
+
+**Symptoms:**
+- Startup time grows quadratically as the number of watched paths increases.
+- CPU spikes during watch registration for large path sets.
+
+**Workaround:**
+
+Use `Watcher::update_paths()` to register all paths in a single batch. The FSEvents backend rebuilds its stream only once for the entire batch:
+
+```rust
+use notify::{PathOp, RecursiveMode, Watcher, recommended_watcher};
+
+let paths_to_watch: Vec<std::path::PathBuf> = vec![
+    "/Users/me/projects/app".into(),
+    "/Users/me/projects/lib".into(),
+    "/Users/me/config".into(),
+    // ... potentially many more
+];
+
+let mut watcher = recommended_watcher(|res| println!("{res:?}"))?;
+
+// Build the batch and register all paths in one call
+let ops: Vec<PathOp> = paths_to_watch
+    .into_iter()
+    .map(PathOp::watch_recursive)
+    .collect();
+
+watcher.update_paths(ops)?;
+```
+
+`update_paths` can also mix `PathOp::Watch` and `PathOp::Unwatch` operations, and on non-macOS backends it falls back to sequential `watch`/`unwatch` calls with the same semantics.
+
+</Accordion>

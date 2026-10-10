@@ -1,0 +1,74 @@
+---
+title: "Debouncing Filesystem Events: Mini vs Full Debouncer"
+sidebarTitle: "Overview"
+description: "Compare notify's two debouncer crates: debouncer-mini for simple timeout-based deduplication and debouncer-full for smart rename stitching and duplicate suppression."
+---
+
+Filesystem watchers are noisy by nature. A single logical operation — saving a file in your editor, copying a directory, or running a build tool — can generate dozens of raw kernel events in rapid succession. Without debouncing, your application must filter that flood itself. The `notify` ecosystem ships two dedicated debouncer crates that sit on top of the core `notify` watcher and do this filtering for you, each with a different philosophy.
+
+## Why debouncing is needed
+
+When an editor saves a file it typically writes to a temporary path, flushes, syncs metadata, and finally renames the temp file over the original — each step triggering one or more filesystem events. On Linux, `inotify` fires separate events for the open, each write chunk, the close, and the rename. On macOS, FSEvents may batch and replay events with artificial timestamps. In large directory trees a recursive watch can produce thousands of events per second under heavy load.
+
+Without a debouncing layer your handler sees:
+
+- Multiple `Modify` events for a single conceptual write
+- Orphaned `Rename(From)` events with no matching `Rename(To)` counterpart
+- Spurious `Create` followed immediately by `Modify` on the same path
+- Separate `Remove` events for every child file when a directory is deleted
+
+A debouncer collapses this noise into one meaningful event per file per change window.
+
+## Two debouncer options
+
+Notify ships two debouncer crates. Both re-export the `notify` crate, so you do not need a separate `notify` dependency unless you want to pin a specific feature set.
+
+| Feature | `notify-debouncer-mini` | `notify-debouncer-full` |
+|---|---|---|
+| Crate | `notify-debouncer-mini` | `notify-debouncer-full` |
+| Model | One event per path per timeout | Rich per-event deduplication |
+| Rename stitching | No | Yes |
+| Duplicate `Create` suppression | No | Yes |
+| `Modify` after `Create` suppression | No | Yes |
+| Single `Remove` for directory deletion | No | Yes |
+| File ID tracking | No | Optional (`RecommendedCache`) |
+| Batch mode | Yes (configurable) | Yes (tick-rate based) |
+| Event type | `DebouncedEvent { path, kind }` | `DebouncedEvent { event, time }` |
+| Continuous event signal | `AnyContinuous` kind | — |
+| Watcher access | `debouncer.watcher()` | direct methods on `Debouncer` |
+
+## When to use debouncer-mini
+
+`notify-debouncer-mini` is the right choice when you need the simplest possible integration. It does one thing: suppress redundant events for the same path within a configurable timeout window. If activity on a path is still ongoing when the timeout would expire, it emits an `AnyContinuous` event instead, letting you know the path is still being modified.
+
+Good use cases:
+
+- **Hot-reload servers** — recompile or restart when a source file changes, but not on every intermediate write
+- **Config file watchers** — reload application configuration once after the user finishes editing
+- **Small directory trees** — where rename tracking is not important and event volume is manageable
+
+## When to use debouncer-full
+
+`notify-debouncer-full` applies a richer set of deduplication rules specifically designed to match the semantics most applications actually want. It understands rename pairs, tracks file system identities (on macOS and Windows), collapses child events when a parent directory is removed, and suppresses the `Modify` noise that immediately follows a `Create`.
+
+Good use cases:
+
+- **IDEs and language servers** — need precise rename events and stable file identity across renames
+- **Build systems** — need to distinguish a new file from a modified one without false `Modify` signals
+- **Sync and backup tools** — must track renames as a single operation, not separate delete + create
+- **Large directory trees** — where inotify would otherwise flood with per-child remove events
+
+<Note>
+Both crates re-export `notify`, so you can write `use notify_debouncer_mini::notify::*` or `use notify_debouncer_full::notify::*` and avoid adding a separate `notify` entry to your `Cargo.toml`. Add `notify` explicitly only when you need to pin specific feature flags.
+</Note>
+
+## Explore each debouncer
+
+<CardGroup cols={2}>
+  <Card title="Debouncer Mini" icon="minimize" href="/debouncing/debouncer-mini">
+    Simple timeout-based deduplication. One event per path per window. Minimal API surface.
+  </Card>
+  <Card title="Debouncer Full" icon="maximize" href="/debouncing/debouncer-full">
+    Smart deduplication with rename stitching, duplicate suppression, and optional file ID tracking.
+  </Card>
+</CardGroup>

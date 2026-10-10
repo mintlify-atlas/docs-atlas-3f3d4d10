@@ -1,0 +1,177 @@
+---
+title: "Installing Notify in Your Rust Project"
+sidebarTitle: "Installation"
+description: "Add notify and its companion debouncer and file-id crates to Cargo.toml, and configure optional Cargo features for serde, async, and platform backends."
+---
+
+Notify is distributed as a family of crates on [crates.io](https://crates.io/crates/notify). The core `notify` crate provides the watcher and event types. Companion crates layer debouncing and stable file identity on top. Pick exactly what your project needs and add it to `[dependencies]` in `Cargo.toml`.
+
+## Core Crate
+
+```toml
+[dependencies]
+notify = "9.0.0-rc.5"
+```
+
+This is sufficient for most use cases. `notify` re-exports everything you need to create a watcher, receive events, and handle errors.
+
+## Debouncer Crates
+
+Raw filesystem events can be extremely noisy — a single editor save may generate dozens of create, modify, and rename events in rapid succession. The debouncer crates collapse bursts of events into a calmer stream.
+
+<Tabs>
+  <Tab title="notify-debouncer-mini">
+
+  A lightweight debouncer that coalesces rapid events for the same path into one notification. Ideal when you only care that *something* changed, not the precise sequence of operations.
+
+  ```toml
+  [dependencies]
+  notify-debouncer-mini = "0.6.0"
+  ```
+
+  </Tab>
+  <Tab title="notify-debouncer-full">
+
+  A full-featured debouncer with rename correlation, event caching, and richer output. Recommended when your application needs to distinguish creates from renames or track the old and new paths of a move.
+
+  ```toml
+  [dependencies]
+  notify-debouncer-full = "0.8.0-rc.2"
+  ```
+
+  </Tab>
+</Tabs>
+
+<Note>
+  Both debouncer crates re-export `notify` internally. If you also declare a direct `notify` dependency to enable extra features (such as `serde`), pin it to the same version to avoid duplicate crate compilation:
+
+  ```toml
+  [dependencies]
+  notify-debouncer-mini = "0.6.0"
+  notify = { version = "9.0.0-rc.5", features = ["serde"] }
+  ```
+</Note>
+
+## File Identity Crate
+
+`file-id` provides a cross-platform stable identifier for an open file: an inode number on Unix, and a (volume serial number, file index) pair on Windows. Use it when you need to correlate events across renames.
+
+```toml
+[dependencies]
+file-id = "0.2.3"
+```
+
+---
+
+## Feature Flags: `notify`
+
+The `notify` crate exposes the following optional Cargo features:
+
+| Feature | Default | Description |
+|---|---|---|
+| `macos_fsevent` | ✅ yes | FSEvents backend on macOS (recommended). |
+| `macos_kqueue` | no | Use kqueue instead of FSEvents on macOS. Mutually exclusive with `macos_fsevent`. |
+| `freebsd_inotify` | no | Force the inotify backend when **cross-compiling** for FreeBSD 14.5+. On a native FreeBSD 14.5+ build this is selected automatically; this flag is only needed for cross-compilation. |
+| `serde` | no | Derive `Serialize`/`Deserialize` for `Event` and related types via [serde](https://serde.rs). |
+| `serialization-compat-6` | no | Restore the serialization format of notify 6.x. Off by default; useful when migrating serialized events from an older version. |
+| `tokio` | no | Implement `EventHandler` for `tokio::sync::mpsc::UnboundedSender<Result<Event>>`. |
+| `futures` | no | Implement `EventHandler` for `futures::channel::mpsc::UnboundedSender<Result<Event>>`. |
+| `crossbeam-channel` | no | Implement `EventHandler` for `crossbeam_channel::Sender<Result<Event>>`. |
+| `flume` | no | Implement `EventHandler` for `flume::Sender<Result<Event>>`. |
+
+### Enabling serde Serialization
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["serde"] }
+```
+
+### Using the tokio Async Runtime
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["tokio"] }
+```
+
+Then pass a `tokio::sync::mpsc::unbounded_channel()` sender directly to `recommended_watcher()`:
+
+```rust
+use notify::{RecursiveMode, Watcher};
+
+#[tokio::main]
+async fn main() -> notify::Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(std::path::Path::new("."), RecursiveMode::Recursive)?;
+
+    while let Some(res) = rx.recv().await {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+    Ok(())
+}
+```
+
+### Using the futures Channel
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["futures"] }
+```
+
+### Using crossbeam-channel
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["crossbeam-channel"] }
+```
+
+### Using flume
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["flume"] }
+```
+
+### Selecting kqueue on macOS
+
+If you want kqueue semantics on macOS instead of the default FSEvents backend, disable the default features and enable `macos_kqueue`:
+
+```toml
+notify = { version = "9.0.0-rc.5", default-features = false, features = ["macos_kqueue"] }
+```
+
+<Warning>
+  `macos_fsevent` and `macos_kqueue` are mutually exclusive. Enabling both produces a compile error. If you disable `default-features` you must pick exactly one macOS backend (or neither, in which case `PollWatcher` is used on macOS).
+</Warning>
+
+---
+
+## Feature Flags: Debouncer Crates
+
+Both `notify-debouncer-mini` and `notify-debouncer-full` support the same async channel features as `notify`:
+
+| Feature | Description |
+|---|---|
+| `serde` | Serialization support for debouncer event types. |
+| `tokio` | `EventHandler` impl for `tokio::sync::mpsc::UnboundedSender`. |
+| `futures` | `EventHandler` impl for `futures::channel::mpsc::UnboundedSender`. |
+| `crossbeam-channel` | `EventHandler` impl for `crossbeam_channel::Sender`. |
+| `flume` | `EventHandler` impl for `flume::Sender`. |
+
+Enable a feature on the debouncer crate the same way you would on `notify`:
+
+```toml
+[dependencies]
+notify-debouncer-full = { version = "0.8.0-rc.2", features = ["serde"] }
+```
+
+---
+
+## MSRV Requirement
+
+Notify requires **Rust 1.88** or later. Make sure your toolchain meets this requirement:
+
+```sh
+rustup update stable
+rustc --version   # should print 1.88.0 or higher
+```
+
+MSRV bumps may occur in minor releases but never drop support for more than two stable releases behind the current stable (N, N-1, N-2 are always guaranteed).

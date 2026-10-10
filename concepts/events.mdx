@@ -1,0 +1,254 @@
+---
+title: "Understanding Filesystem Events in Notify"
+sidebarTitle: "Events"
+description: "Explore Notify's event taxonomy: Event, EventKind, and all subtypes including AccessKind, CreateKind, ModifyKind, RemoveKind, and EventKindMask for filtering."
+---
+
+Every change the OS reports to Notify is delivered as an `Event` value. Understanding the event taxonomy — the nested enums that describe *what* happened and *how precisely* the backend knows it — lets you write handlers that react only to the activity you care about and ignore everything else.
+
+## The `Event` Struct
+
+```rust
+pub struct Event {
+    pub kind:  EventKind,
+    pub paths: Vec<PathBuf>,
+    pub attrs: EventAttributes,
+}
+```
+
+| Field | Description |
+|---|---|
+| `kind` | The hierarchical classification of what happened. |
+| `paths` | The path(s) involved. For renames where both sides are known, the source path comes first and the destination last. |
+| `attrs` | Optional extra data: `tracker` cookie, `flag`, `info` string, `source` backend name, and an experimental `process_id`. |
+
+Event paths use the same root representation as the path passed to `Watcher::watch`. Watching a relative path yields relative event paths; watching an absolute path yields absolute event paths.
+
+### EventAttributes
+
+`EventAttributes` carries supplementary data that not all backends provide:
+
+- **`tracker()`** — an opaque cookie linking related events (for example, inotify uses a rename cookie to pair `RenameMode::From` and `RenameMode::To` events).
+- **`flag()`** — currently only `Flag::Rescan`, which signals a possible event gap and that your in-memory state should be refreshed from disk.
+- **`info()`** — a backend-defined hint string, primarily used to clarify `Other` variants (e.g. `"unmount"`, `"mount"`, `"root changed"`).
+- **`source()`** — identifies the backend that produced the event (usually `None` for built-in backends).
+- **`process_id()`** — experimental; the PID of the process that triggered the event, when available.
+
+Check `event.need_rescan()` as a shorthand for `event.flag() == Some(Flag::Rescan)`.
+
+## The `EventKind` Hierarchy
+
+`EventKind` is the top-level discriminant. All backends provide at least this level; finer-grained subkinds depend on what the underlying OS API exposes.
+
+```
+EventKind
+├── Any              — unknown / imprecise event
+├── Access(AccessKind)
+├── Create(CreateKind)
+├── Modify(ModifyKind)
+│   ├── Data(DataChange)
+│   ├── Metadata(MetadataKind)
+│   └── Name(RenameMode)
+├── Remove(RemoveKind)
+└── Other            — platform-specific known event
+```
+
+`EventKind::Any` is the fall-through case used when the backend cannot determine which category applies. `EventKind::Other` means the backend knows what happened but it does not fit any defined category; the `info()` attribute should contain a description.
+
+### `EventKind::Access(AccessKind)`
+
+Non-mutating access operations: opening, closing, and reading file handles.
+
+| Variant | Meaning |
+|---|---|
+| `AccessKind::Any` | An access event of unspecified kind. |
+| `AccessKind::Read` | The file was read. |
+| `AccessKind::Open(AccessMode)` | A file handle was opened. |
+| `AccessKind::Close(AccessMode)` | A file handle was closed. |
+| `AccessKind::Other` | A known access event that does not fit above. |
+
+`AccessMode` qualifies `Open` and `Close`:
+
+| Variant | Meaning |
+|---|---|
+| `AccessMode::Any` | Access mode unknown. |
+| `AccessMode::Execute` | File executed or folder opened. |
+| `AccessMode::Read` | Opened for reading. |
+| `AccessMode::Write` | Opened for writing. |
+| `AccessMode::Other` | Known mode that cannot be represented otherwise. |
+
+<Note>
+  Access events are only available on some platforms. On Linux, inotify can emit
+  them; on other backends they may be absent or require specific
+  `EventKindMask` flags. Use `EventKindMask::CORE` if you want to suppress
+  access events entirely.
+</Note>
+
+### `EventKind::Create(CreateKind)`
+
+A file, folder, or other filesystem object was created.
+
+| Variant | Meaning |
+|---|---|
+| `CreateKind::Any` | Something was created; exact type unknown. |
+| `CreateKind::File` | A file was created. |
+| `CreateKind::Folder` | A directory was created. |
+| `CreateKind::Other` | A known creation type that cannot be represented otherwise. |
+
+### `EventKind::Modify(ModifyKind)`
+
+Content, metadata, or the name of an existing entry changed.
+
+#### `ModifyKind::Data(DataChange)` — content changed
+
+| Variant | Meaning |
+|---|---|
+| `DataChange::Any` | Data changed; specifics unknown. |
+| `DataChange::Size` | The file's size changed. |
+| `DataChange::Content` | The file's content changed. |
+| `DataChange::Other` | A known data change that cannot be represented otherwise. |
+
+#### `ModifyKind::Metadata(MetadataKind)` — attributes changed
+
+| Variant | Meaning |
+|---|---|
+| `MetadataKind::Any` | Metadata changed; specifics unknown. |
+| `MetadataKind::AccessTime` | The access timestamp changed. |
+| `MetadataKind::WriteTime` | The write/modify timestamp changed. |
+| `MetadataKind::Permissions` | Permissions changed. |
+| `MetadataKind::Ownership` | Ownership (user/group) changed. |
+| `MetadataKind::Extended` | An extended attribute changed. The `info()` attribute may name it. |
+| `MetadataKind::Other` | A known metadata change that cannot be represented otherwise. |
+
+#### `ModifyKind::Name(RenameMode)` — path changed
+
+| Variant | Meaning |
+|---|---|
+| `RenameMode::Any` | A rename event; direction unknown. |
+| `RenameMode::From` | Emitted on the path that was the *source* of a rename. |
+| `RenameMode::To` | Emitted on the path that was the *target* of a rename. |
+| `RenameMode::Both` | A single event carrying both the source (first) and target (second) paths. |
+| `RenameMode::Other` | A known rename type that cannot be represented otherwise. |
+
+When both endpoints are known, backends prefer `RenameMode::Both` and put the source path first in `event.paths`. Use `event.attrs.tracker()` to correlate separate `From`/`To` events on backends that emit them individually.
+
+### `EventKind::Remove(RemoveKind)`
+
+A file, folder, or other object was removed. This is also triggered by renames that move an entry *out* of the watched subtree.
+
+| Variant | Meaning |
+|---|---|
+| `RemoveKind::Any` | Something was removed; type unknown. |
+| `RemoveKind::File` | A file was removed. |
+| `RemoveKind::Folder` | A directory was removed. |
+| `RemoveKind::Other` | A known removal type that cannot be represented otherwise. |
+
+<Warning>
+  Some editors trigger `Remove` events on save because they rename the original
+  file away and create a new one in its place rather than truncating in-place.
+  Do not assume a `Remove` event always means permanent deletion — a
+  corresponding `Create` may follow immediately. See also the note on editor
+  save behavior in the [Notify known problems](https://github.com/notify-rs/notify/blob/main/notify/src/lib.rs).
+</Warning>
+
+## Matching Events
+
+Pattern-match on `event.kind` to dispatch to your application logic. Use broad patterns where the subkind is not important, and precise patterns when it is:
+
+```rust
+use notify::{Event, EventKind};
+use notify::event::{ModifyKind, DataChange};
+
+fn handle(event: Event) {
+    match event.kind {
+        EventKind::Create(_) => {
+            println!("created: {:?}", event.paths);
+        }
+        EventKind::Modify(ModifyKind::Data(DataChange::Content)) => {
+            println!("content changed: {:?}", event.paths);
+        }
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            println!("renamed: {:?}", event.paths);
+        }
+        EventKind::Remove(_) => {
+            println!("removed: {:?}", event.paths);
+        }
+        _ => {}
+    }
+}
+```
+
+`EventKind` also provides convenience methods: `is_access()`, `is_create()`, `is_modify()`, `is_remove()`, and `is_other()`.
+
+## `EventKindMask` — Filtering Events
+
+`EventKindMask` is a bitflags type that controls which event kinds are delivered at all. Pass it to `Config::with_event_kinds` when constructing a watcher. On Linux (inotify), the mask is translated to native kernel flags, so undesired event categories are not just discarded in userspace — they are never reported by the kernel.
+
+### Predefined Masks
+
+| Constant | Includes |
+|---|---|
+| `EventKindMask::ALL` | Every event kind including access events. **Default.** |
+| `EventKindMask::CORE` | `CREATE \| REMOVE \| ALL_MODIFY` — excludes all access events. |
+| `EventKindMask::ALL_MODIFY` | `MODIFY_DATA \| MODIFY_META \| MODIFY_NAME` |
+| `EventKindMask::ALL_ACCESS` | `ACCESS_OPEN \| ACCESS_CLOSE \| ACCESS_CLOSE_NOWRITE` |
+
+### Individual Flags
+
+| Flag | Covers |
+|---|---|
+| `EventKindMask::CREATE` | `EventKind::Create(_)` |
+| `EventKindMask::REMOVE` | `EventKind::Remove(_)` |
+| `EventKindMask::MODIFY_DATA` | `EventKind::Modify(ModifyKind::Data(_))` |
+| `EventKindMask::MODIFY_META` | `EventKind::Modify(ModifyKind::Metadata(_))` |
+| `EventKindMask::MODIFY_NAME` | `EventKind::Modify(ModifyKind::Name(_))` |
+| `EventKindMask::ACCESS_OPEN` | `AccessKind::Open(_)` |
+| `EventKindMask::ACCESS_CLOSE` | `AccessKind::Close(AccessMode::Write)` |
+| `EventKindMask::ACCESS_CLOSE_NOWRITE` | `AccessKind::Close(AccessMode::Read)` — can be very noisy |
+
+Combine flags with `|`:
+
+```rust
+use notify::{Config, EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+
+// Receive only creation and removal events
+let config = Config::default()
+    .with_event_kinds(EventKindMask::CREATE | EventKindMask::REMOVE);
+
+let mut watcher = RecommendedWatcher::new(|res| println!("{res:?}"), config)?;
+watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+```
+
+`EventKind::Any` and `EventKind::Other` always pass through regardless of the mask — they represent meta-events that should not be filtered.
+
+<Note>
+  `EventKindMask::ACCESS_CLOSE_NOWRITE` (files closed after read-only access)
+  can be extremely noisy on busy systems and may cause queue overflows on inotify.
+  Avoid it unless you have a specific need for read-close events.
+</Note>
+
+## Serde Serialization
+
+When the `serde` feature is enabled, `Event`, `EventKind`, and all subtype enums derive `Serialize` and `Deserialize`:
+
+```toml
+# Cargo.toml
+notify = { version = "9.0.0-rc.5", features = ["serde"] }
+```
+
+By default, enums are serialized using kebab-case tag names. The `serialization-compat-6` feature restores the notify 6 serialization format for applications that need backward compatibility.
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="Watchers" href="/concepts/watchers">
+    Create watchers, watch paths, and use batch operations.
+  </Card>
+  <Card title="Configuration" href="/concepts/configuration">
+    Configure EventKindMask and other watcher settings.
+  </Card>
+  <Card title="Backends" href="/concepts/backends">
+    See which event subtypes each platform backend can produce.
+  </Card>
+</CardGroup>

@@ -1,0 +1,124 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Notify",
+  "projectDescription": "Cross-platform filesystem notification library for Rust that provides real-time file and directory change events via native OS backends (inotify, FSEvents, kqueue, ReadDirectoryChangesW) with optional debouncing.",
+  "theme": "luma",
+  "primaryColor": "#0066cc",
+  "lightColor": "#097efc",
+  "darkColor": "#70b4fc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/watchers",
+              "concepts/events",
+              "concepts/configuration",
+              "concepts/backends"
+            ]
+          },
+          {
+            "group": "Debouncing",
+            "pages": [
+              "debouncing/overview",
+              "debouncing/debouncer-mini",
+              "debouncing/debouncer-full"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/async",
+              "guides/event-filtering",
+              "guides/poll-watcher",
+              "guides/known-issues"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": [
+              "migration/v8-to-v9",
+              "migration/v4-to-v5"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "notify",
+            "pages": [
+              "api/watcher-trait",
+              "api/recommended-watcher",
+              "api/poll-watcher",
+              "api/config",
+              "api/events",
+              "api/errors"
+            ]
+          },
+          {
+            "group": "Crates",
+            "pages": [
+              "api/debouncer-mini",
+              "api/debouncer-full",
+              "api/file-id"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Native OS backends: inotify (Linux/Android), FSEvents (macOS), kqueue (BSD/iOS), ReadDirectoryChangesW (Windows)",
+    "Cross-platform polling fallback via PollWatcher",
+    "Automatic backend selection with recommended_watcher()",
+    "Recursive and non-recursive directory watching",
+    "Rich event taxonomy: Create, Modify (data/metadata/name), Remove, Access, Other",
+    "Event kind filtering via EventKindMask for kernel-level noise reduction",
+    "Two debouncing layers: notify-debouncer-mini (lightweight) and notify-debouncer-full (smart rename stitching)",
+    "Async support via tokio, futures, crossbeam-channel, and flume",
+    "Serde serialization of events via optional feature flag",
+    "Batch path operations with update_paths() for efficient multi-path management",
+    "file-id utility for unique file identification across renames"
+  ],
+  "publicApiSurface": [
+    "notify::recommended_watcher(event_handler) -> Result<RecommendedWatcher>",
+    "trait Watcher { fn new(), watch(), unwatch(), update_paths(), configure(), watched_paths(), kind() }",
+    "struct Config { with_poll_interval(), with_compare_contents(), with_follow_symlinks(), with_event_kinds(), with_fsevent_latency(), with_windows_path_separator_style() }",
+    "enum RecursiveMode { Recursive, NonRecursive }",
+    "struct Event { kind: EventKind, paths: Vec<PathBuf>, attrs: EventAttributes }",
+    "enum EventKind { Access, Create, Modify, Remove, Any, Other }",
+    "bitflags EventKindMask { ALL, CORE, CREATE, REMOVE, MODIFY_DATA, MODIFY_META, MODIFY_NAME, ALL_ACCESS }",
+    "struct PathOp { watch_recursive(), watch_non_recursive(), unwatch() }",
+    "struct WatchPathConfig { new(), with_recursive_mode(), with_dereference_symlinks() }",
+    "struct UpdatePathsError { source, origin, remaining }",
+    "enum ErrorKind { Generic, Io, PathNotFound, WatchNotFound, InvalidConfig, MaxFilesWatch }",
+    "enum WatcherKind { Inotify, Fsevent, Kqueue, PollWatcher, ReadDirectoryChangesWatcher, NullWatcher }",
+    "INotifyWatcher (Linux/Android/FreeBSD)",
+    "FsEventWatcher (macOS)",
+    "KqueueWatcher (BSD/iOS)",
+    "ReadDirectoryChangesWatcher (Windows)",
+    "PollWatcher (all platforms, polling fallback)",
+    "NullWatcher (testing/no-op)",
+    "notify_debouncer_mini::new_debouncer(timeout, handler) -> Result<Debouncer>",
+    "notify_debouncer_mini::Config { with_timeout(), with_batch_mode(), with_notify_config() }",
+    "notify_debouncer_full::new_debouncer(timeout, tick_rate, handler) -> Result<Debouncer>",
+    "notify_debouncer_full::new_debouncer_opt(timeout, tick_rate, handler, cache, config)",
+    "notify_debouncer_full::RecommendedCache / NoCache / FileIdMap",
+    "file_id::get_file_id(path) -> Result<FileId>",
+    "file_id::get_file_id_no_follow(path) -> Result<FileId>",
+    "enum FileId { Inode { device_id, inode_number }, LowRes { volume_serial_number, file_index }, HighRes { ... } }"
+  ]
+}

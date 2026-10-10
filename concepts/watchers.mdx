@@ -1,0 +1,242 @@
+---
+title: "Watchers: The Core of Notify's File Watching API"
+sidebarTitle: "Watchers"
+description: "Learn how the Watcher trait works in Notify, how to create watchers, watch and unwatch paths, and use batch path operations with update_paths()."
+---
+
+The `Watcher` trait is the central abstraction in Notify. Every backend — whether it uses inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows, or a simple poll loop — implements `Watcher`, giving you a single consistent interface regardless of which platform your code runs on.
+
+## Creating a Watcher
+
+### `recommended_watcher()` — the ergonomic entry point
+
+The easiest way to create a watcher is the free function `notify::recommended_watcher`. It constructs the best available backend for the current platform with a `Config::default()`, so you do not need to name the concrete backend type.
+
+```rust
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::{path::Path, sync::mpsc};
+
+fn main() -> Result<()> {
+    let (tx, rx) = mpsc::channel::<Result<Event>>();
+
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+The event handler argument can be a closure, an `std::sync::mpsc::Sender<Result<Event>>`, a `crossbeam_channel::Sender`, a `tokio::sync::mpsc::UnboundedSender`, or any type that implements the `EventHandler` trait.
+
+### `Watcher::new(event_handler, config)` — explicit construction
+
+When you need fine-grained control over configuration, construct a specific backend directly:
+
+```rust
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_poll_interval(Duration::from_secs(5));
+
+let mut watcher = PollWatcher::new(|res| println!("{res:?}"), config)?;
+watcher.watch(Path::new("/data"), RecursiveMode::Recursive)?;
+```
+
+<Note>
+  Because `Watcher` is a trait, the compiler cannot infer the concrete type when
+  calling `Watcher::new(...)` directly through the trait. Prefer
+  `recommended_watcher()` or construct a named backend type like `PollWatcher`
+  or `RecommendedWatcher`.
+</Note>
+
+## Watching and Unwatching Paths
+
+### `watch(path, RecursiveMode)`
+
+Begin watching a path. If `path` is a directory, `recursive_mode` determines whether subdirectories are also watched:
+
+- **`RecursiveMode::Recursive`** — watches the directory and all of its descendants, including directories created after the watch is installed.
+- **`RecursiveMode::NonRecursive`** — watches only the directory itself and its immediate children.
+
+When `path` is a file, `recursive_mode` is ignored and events are delivered only for that file.
+
+```rust
+use notify::{RecursiveMode, Watcher};
+use std::path::Path;
+
+// Watch everything under /var/log recursively
+watcher.watch(Path::new("/var/log"), RecursiveMode::Recursive)?;
+
+// Watch only the directory entry itself, not subdirectories
+watcher.watch(Path::new("/tmp/uploads"), RecursiveMode::NonRecursive)?;
+```
+
+<Note>
+  Event paths are reported using the same root representation that was passed to
+  `watch`. If you pass a relative path, emitted event paths will be relative to
+  the process's working directory at the time of the call. Pass an absolute path
+  if your application needs absolute event paths.
+</Note>
+
+Calling `watch` a second time for the same backend-resolved path **replaces** the existing watch — the `RecursiveMode` is updated, no second independent watch is added, and a single `unwatch` call removes the path.
+
+### `watch_with(path, WatchPathConfig)`
+
+A variant of `watch` that accepts per-path settings through `WatchPathConfig`:
+
+```rust
+use notify::{RecursiveMode, WatchPathConfig, Watcher};
+use std::path::Path;
+
+let config = WatchPathConfig::new(RecursiveMode::NonRecursive)
+    .with_dereference_symlinks(false);
+
+watcher.watch_with(Path::new("/data/link"), config)?;
+```
+
+Backends that do not implement a particular `WatchPathConfig` option fall back to the behaviour of `watch` for that option.
+
+### `unwatch(path)`
+
+Stop watching a path. Returns an error if the path was not being watched.
+
+```rust
+watcher.unwatch(Path::new("/var/log"))?;
+```
+
+## Batch Operations with `update_paths()`
+
+For workloads that add or remove many paths at once, `update_paths` is more efficient than calling `watch`/`unwatch` in a loop. On macOS, the FSEvents backend rebuilds its stream only once for the whole batch instead of once per path — avoiding O(N²) stream registrations.
+
+Build a `Vec<PathOp>` using the constructors on `PathOp`:
+
+| Constructor | Equivalent |
+|---|---|
+| `PathOp::watch_recursive(path)` | `watch(path, RecursiveMode::Recursive)` |
+| `PathOp::watch_non_recursive(path)` | `watch(path, RecursiveMode::NonRecursive)` |
+| `PathOp::unwatch(path)` | `unwatch(path)` |
+
+```rust
+use notify::{PathOp, Watcher};
+use std::path::PathBuf;
+
+let mut watcher = notify::NullWatcher;
+let mut batch = Vec::new();
+
+batch.push(PathOp::watch_recursive(PathBuf::from("/tmp/dir_a")));
+batch.push(PathOp::watch_recursive(PathBuf::from("/tmp/dir_b")));
+batch.push(PathOp::unwatch(PathBuf::from("/tmp/old_dir")));
+
+watcher.update_paths(batch)?;
+```
+
+Operations are applied sequentially. If one fails, an `UpdatePathsError` is returned that carries the failing operation (`.origin`) and the operations that were not attempted (`.remaining`), so you can retry or skip and continue:
+
+```rust
+use notify::{PathOp, Watcher};
+
+let mut pending: Vec<PathOp> = /* ... */ vec![];
+
+while !pending.is_empty() {
+    if let Err(e) = watcher.update_paths(std::mem::take(&mut pending)) {
+        // e.origin failed; e.remaining were not attempted
+        pending = e.remaining;
+    }
+}
+```
+
+<Tip>
+  On macOS, prefer `update_paths` over repeated `watch` calls whenever you need
+  to register more than a handful of independent paths. Each separate `watch`
+  call that adds a path not already covered by a recursive watch forces a full
+  FSEvents stream rebuild.
+</Tip>
+
+## Querying and Reconfiguring
+
+### `watched_paths()`
+
+Returns a `Vec<(PathBuf, RecursiveMode)>` listing every currently watched path and its recursive mode. Paths are returned using the same representation that was passed to `watch` or `update_paths`.
+
+```rust
+for (path, mode) in watcher.watched_paths()? {
+    println!("{}: {:?}", path.display(), mode);
+}
+```
+
+### `configure(Config)`
+
+Apply a new `Config` to a running watcher without recreating it. Returns `Ok(true)` if the backend supports runtime reconfiguration, `Ok(false)` if it does not. Not all backends implement this; check the return value before relying on it.
+
+```rust
+use notify::{Config, Watcher};
+use std::time::Duration;
+
+let new_config = Config::default()
+    .with_poll_interval(Duration::from_secs(10));
+
+match watcher.configure(new_config)? {
+    true  => println!("config applied"),
+    false => println!("backend does not support runtime reconfiguration"),
+}
+```
+
+### `kind() -> WatcherKind`
+
+A static method that identifies which backend a watcher type represents. Useful for applying backend-specific logic at runtime:
+
+```rust
+use notify::{RecommendedWatcher, Watcher, WatcherKind};
+
+match RecommendedWatcher::kind() {
+    WatcherKind::Inotify     => println!("using inotify"),
+    WatcherKind::Fsevent     => println!("using FSEvents"),
+    WatcherKind::Kqueue      => println!("using kqueue"),
+    WatcherKind::ReadDirectoryChangesWatcher => println!("using ReadDirectoryChangesW"),
+    WatcherKind::PollWatcher => println!("using polling"),
+    WatcherKind::NullWatcher => println!("using null watcher"),
+    _ => {}
+}
+```
+
+The full `WatcherKind` enum variants are: `Inotify`, `Fsevent`, `Kqueue`, `PollWatcher`, `ReadDirectoryChangesWatcher`, and `NullWatcher`.
+
+## NullWatcher for Testing
+
+`NullWatcher` is a no-op backend that accepts all `Watcher` API calls without actually watching anything. It is useful in unit tests where you need to exercise code that holds a `Box<dyn Watcher>` or calls `update_paths` without wanting real filesystem monitoring:
+
+```rust
+use notify::{NullWatcher, PathOp, Watcher};
+use std::path::PathBuf;
+
+let mut watcher = NullWatcher;
+
+// These calls succeed but produce no events
+watcher.update_paths(vec![
+    PathOp::watch_recursive(PathBuf::from("/some/path")),
+])?;
+```
+
+`NullWatcher` also makes `Watcher` object-safe — you can hold `&dyn Watcher` where needed.
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="Events" href="/concepts/events">
+    Understand the Event struct and the full EventKind hierarchy.
+  </Card>
+  <Card title="Configuration" href="/concepts/configuration">
+    Configure poll intervals, symlink following, and event filtering.
+  </Card>
+  <Card title="Backends" href="/concepts/backends">
+    Learn which native backend Notify selects on each platform.
+  </Card>
+</CardGroup>

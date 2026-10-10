@@ -1,47 +1,222 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Notify: Watch Files in Rust"
+sidebarTitle: "Quickstart"
+description: "Learn how to watch a directory for filesystem changes in Rust using Notify's recommended_watcher() in under five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+Notify lets you react to filesystem changes — file creates, writes, deletes, renames — on Linux, macOS, Windows, and BSD with a single API. This guide walks you through the three steps needed to go from a blank project to a working directory watcher.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+  <Step title="Add the dependency">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+  Open your project's `Cargo.toml` and add `notify` under `[dependencies]`:
 
-    ```bash
-    your-cli start
-    ```
+  ```toml
+  [dependencies]
+  notify = "9.0.0-rc.5"
+  ```
+
+  That's all you need to get started. See [Installation](/installation) for optional feature flags that enable serde serialization, async channel support, and alternative macOS backends.
+
   </Step>
+
+  <Step title="Create the watcher">
+
+  `notify::recommended_watcher()` is the simplest way to construct a watcher. It automatically selects the best backend available on the current platform — `inotify` on Linux, `FSEvents` on macOS, `ReadDirectoryChangesW` on Windows — and falls back to `PollWatcher` where no native backend exists.
+
+  The function accepts any value that implements the `EventHandler` trait. The standard library's `std::sync::mpsc::Sender` implements it out of the box, making a channel a natural fit for most use cases:
+
+  ```rust
+  use notify::{Event, RecursiveMode, Result, Watcher};
+  use std::{path::Path, sync::mpsc};
+
+  fn main() -> Result<()> {
+      let (tx, rx) = mpsc::channel::<Result<Event>>();
+
+      // recommended_watcher() automatically picks the best backend for your
+      // platform. The EventHandler here is the channel Sender.
+      let mut watcher = notify::recommended_watcher(tx)?;
+
+      // Watch the current directory and everything inside it recursively.
+      watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+  ```
+
+  Pass `RecursiveMode::NonRecursive` if you only want to watch immediate children of a directory, without descending into subdirectories.
+
+  </Step>
+
+  <Step title="Handle events">
+
+  Once the watcher is running, events arrive on the receiving end of the channel. Iterate over `rx` to process them:
+
+  ```rust
+      // Block, printing events as they arrive.
+      for res in rx {
+          match res {
+              Ok(event) => println!("event: {:?}", event),
+              Err(e) => println!("watch error: {:?}", e),
+          }
+      }
+
+      Ok(())
+  }
+  ```
+
+  Each item in the channel is a `Result<Event>`. The `Event` type carries the event kind (create, modify, remove, rename, …) and the list of affected paths.
+
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Complete Working Example
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+Putting all three steps together gives you the canonical Notify program:
+
+```rust
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::{path::Path, sync::mpsc};
+
+fn main() -> Result<()> {
+    let (tx, rx) = mpsc::channel::<Result<Event>>();
+
+    // Use recommended_watcher() to automatically select the best implementation
+    // for your platform. The `EventHandler` passed to this constructor can be a
+    // closure, a `std::sync::mpsc::Sender`, a `crossbeam_channel::Sender`, or
+    // another type the trait is implemented for.
+    let mut watcher = notify::recommended_watcher(tx)?;
+
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    // Block forever, printing out events as they come in
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+## Alternative: Callback-Based Watcher
+
+Instead of a channel, you can pass a plain function or closure as the event handler. This is useful when you want to react to events inline, or when you need multiple watchers that all report to the same handler:
+
+<Tabs>
+  <Tab title="Named function">
+
+  ```rust
+  use notify::{RecursiveMode, Result, Watcher};
+  use std::path::Path;
+
+  fn event_fn(res: Result<notify::Event>) {
+      match res {
+          Ok(event) => println!("event: {:?}", event),
+          Err(e) => println!("watch error: {:?}", e),
+      }
+  }
+
+  fn main() -> Result<()> {
+      let mut watcher1 = notify::recommended_watcher(event_fn)?;
+      // Use the same handler for a second watcher with different config
+      let mut watcher2 = notify::recommended_watcher(event_fn)?;
+
+      watcher1.watch(Path::new("/tmp/a"), RecursiveMode::Recursive)?;
+      watcher2.watch(Path::new("/tmp/b"), RecursiveMode::Recursive)?;
+
+      // Both watchers call event_fn when anything changes under their paths.
+      std::thread::park();
+      Ok(())
+  }
+  ```
+
+  </Tab>
+  <Tab title="Closure">
+
+  ```rust
+  use notify::{RecursiveMode, Result, Watcher};
+  use std::path::Path;
+
+  fn main() -> Result<()> {
+      let mut watcher = notify::recommended_watcher(|res: Result<notify::Event>| {
+          match res {
+              Ok(event) => println!("event: {:?}", event),
+              Err(e) => println!("watch error: {:?}", e),
+          }
+      })?;
+
+      watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+      std::thread::park();
+      Ok(())
+  }
+  ```
+
+  </Tab>
+</Tabs>
+
+## Using the Low-Level `RecommendedWatcher` Directly
+
+If you need to pass an explicit `Config` at construction time — for example to tune the FSEvents latency on macOS or to configure the poll interval on `PollWatcher` — construct `RecommendedWatcher` directly instead of calling `recommended_watcher()`:
+
+```rust
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+
+fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // Automatically select the best implementation for your platform.
+    // You can also access each implementation directly e.g. INotifyWatcher.
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => log::info!("Change: {event:?}"),
+            Err(error) => log::error!("Error: {error:?}"),
+        }
+    }
+
+    Ok(())
+}
+```
+
+<Note>
+  `notify::recommended_watcher(handler)` is equivalent to `RecommendedWatcher::new(handler, Config::default())`. Prefer the free function for brevity when you don't need a custom `Config`.
+</Note>
+
+## Unwatching a Path
+
+To stop watching a path at runtime, call `watcher.unwatch()`:
+
+```rust
+watcher.unwatch(Path::new("."))?;
+```
+
+The watcher continues to run and can be pointed at new paths with further `watch()` calls.
+
+## Watching Many Paths at Once
+
+On macOS, each `watch()` call that adds a path not already covered by an existing recursive watch causes the FSEvents stream to be rebuilt. Adding N independent paths individually registers O(N²) paths in total. Use `update_paths()` to register a batch in one operation:
+
+```rust
+use notify::{PathOp, Watcher};
+
+watcher.update_paths(vec![
+    PathOp::watch_recursive("/tmp/a"),
+    PathOp::watch_recursive("/tmp/b"),
+    PathOp::watch_recursive("/tmp/c"),
+])?;
+```
+
+<Tip>
+  If your application reacts to file saves (e.g. re-running a build or reloading configuration), consider using **notify-debouncer-mini** or **notify-debouncer-full**. Editors often write files in several rapid steps, and a debouncer collapses these into a single notification. See [Installation](/installation) for the dependency snippet.
 </Tip>

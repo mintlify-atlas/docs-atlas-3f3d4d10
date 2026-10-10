@@ -1,0 +1,214 @@
+---
+title: "recommended_watcher() and RecommendedWatcher"
+sidebarTitle: "RecommendedWatcher"
+description: "Reference for notify::recommended_watcher() and the RecommendedWatcher type alias — the easiest way to create the best available watcher for the current platform."
+---
+
+`recommended_watcher` is the most ergonomic entry point into notify. It constructs a `RecommendedWatcher` — a type alias that resolves to the best native backend for the platform you compile for — without requiring you to name the concrete type. Under the hood it simply calls `RecommendedWatcher::new(event_handler, Config::default())`.
+
+---
+
+## Free function
+
+```rust
+pub fn recommended_watcher<F: EventHandler>(event_handler: F) -> Result<RecommendedWatcher>
+```
+
+<ParamField path="event_handler" type="F: EventHandler">
+  The handler that receives `Result<Event>` values as filesystem events arrive. Accepts any closure, `std::sync::mpsc::Sender`, `crossbeam_channel::Sender`, `flume::Sender`, `tokio::sync::mpsc::UnboundedSender`, or `futures::channel::mpsc::UnboundedSender`. See [EventHandler](/api/watcher-trait#eventhandler-trait) for the full list.
+</ParamField>
+
+**Returns** `Result<RecommendedWatcher>` — the constructed watcher, or an error if the OS backend could not be initialised.
+
+This is equivalent to:
+
+```rust
+RecommendedWatcher::new(event_handler, Config::default())
+```
+
+If you need non-default configuration (for example a custom FSEvents latency or a specific `EventKindMask`), call `RecommendedWatcher::new` directly and pass a `Config`:
+
+```rust
+use notify::{Config, RecommendedWatcher, Watcher, RecursiveMode};
+use std::{path::Path, time::Duration};
+
+let config = Config::default()
+    .with_fsevent_latency(Duration::from_millis(250));
+
+let mut watcher = RecommendedWatcher::new(|res| println!("{res:?}"), config)?;
+watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+```
+
+---
+
+## `RecommendedWatcher` type alias
+
+`RecommendedWatcher` is a conditional type alias resolved at compile time based on the target platform and enabled Cargo features:
+
+| Platform / condition | Resolved type |
+|----------------------|---------------|
+| Linux, Android | `INotifyWatcher` |
+| FreeBSD 14.5+ (native or `freebsd_inotify` feature) | `INotifyWatcher` |
+| macOS (default, `macos_fsevent` feature) | `FsEventWatcher` |
+| macOS with `macos_kqueue` feature | `KqueueWatcher` |
+| Windows | `ReadDirectoryChangesWatcher` |
+| FreeBSD (older releases), OpenBSD, NetBSD, DragonflyBSD, iOS | `KqueueWatcher` |
+| All other platforms | `PollWatcher` |
+
+<Note>
+FreeBSD native builds automatically select `INotifyWatcher` on 14.5+ and `KqueueWatcher` on older releases. When **cross-compiling** for FreeBSD 14.5+, enable the `freebsd_inotify` feature explicitly so the correct backend is selected.
+</Note>
+
+---
+
+## Platform-specific watcher types
+
+Each backend is re-exported from the `notify` crate and implements the `Watcher` trait. They can be used directly when you need backend-specific behaviour.
+
+### `INotifyWatcher`
+
+Available on: Linux, Android, FreeBSD 14.5+.
+
+Uses the kernel `inotify` API, which delivers events with very low overhead. Supports `with_follow_symlinks` and `with_event_kinds` filtering at the kernel level.
+
+```toml
+# Cargo.toml — no extra features needed on Linux/Android
+notify = "9.0.0-rc.5"
+```
+
+<Warning>
+Linux imposes per-user and per-system limits on the number of inotify watches (`fs.inotify.max_user_watches`). If you watch a large directory tree you may hit `ErrorKind::MaxFilesWatch`. You can raise the limit with `sysctl fs.inotify.max_user_watches=524288` or fall back to `PollWatcher`.
+</Warning>
+
+### `FsEventWatcher`
+
+Available on: macOS (default; requires `macos_fsevent` feature, which is on by default).
+
+Uses Apple's FSEvents API. The `fsevent_latency` config option controls how long the service waits before invoking the callback; larger values coalesce bursts into fewer calls. The first event in an idle period is delivered immediately regardless (the stream is created with `kFSEventStreamCreateFlagNoDefer`).
+
+<Warning>
+Due to macOS's FSEvents security model, events for files not owned by your process may not be observable. Fall back to `PollWatcher` if you encounter this.
+</Warning>
+
+### `KqueueWatcher`
+
+Available on: FreeBSD (older), OpenBSD, NetBSD, DragonflyBSD, iOS, and macOS with the `macos_kqueue` feature.
+
+### `ReadDirectoryChangesWatcher`
+
+Available on: Windows only.
+
+Uses `ReadDirectoryChangesW`. The `windows_path_separator_style` config option controls whether emitted event paths use `/` or `\`.
+
+### `NullWatcher`
+
+Always available on all platforms. A no-op watcher that accepts `watch`/`unwatch` calls and never emits events. Useful for writing tests that compile and run on every platform without triggering OS-level watchers.
+
+```rust
+use notify::{NullWatcher, PathOp, Watcher};
+
+let mut watcher = NullWatcher;
+// These calls succeed silently.
+watcher.update_paths(vec![PathOp::watch_recursive("/tmp")])?;
+```
+
+---
+
+## Examples
+
+### With a standard library channel
+
+```rust
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::{path::Path, sync::mpsc};
+
+fn main() -> Result<()> {
+    let (tx, rx) = mpsc::channel::<Result<Event>>();
+
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    for res in rx {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => eprintln!("watch error: {:?}", e),
+        }
+    }
+
+    Ok(())
+}
+```
+
+### With a closure callback
+
+```rust
+use notify::{RecursiveMode, Result, Watcher};
+use std::path::Path;
+
+fn main() -> Result<()> {
+    let mut watcher = notify::recommended_watcher(|res: Result<notify::Event>| {
+        match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => eprintln!("watch error: {:?}", e),
+        }
+    })?;
+
+    watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+
+    // Keep the watcher alive until the program exits.
+    std::thread::park();
+    Ok(())
+}
+```
+
+### Multiple watchers sharing one callback
+
+```rust
+use notify::{RecursiveMode, Result, Watcher};
+use std::path::Path;
+
+fn event_fn(res: Result<notify::Event>) {
+    match res {
+        Ok(event) => println!("event: {:?}", event),
+        Err(e) => eprintln!("watch error: {:?}", e),
+    }
+}
+
+fn main() -> Result<()> {
+    let mut watcher1 = notify::recommended_watcher(event_fn)?;
+    let mut watcher2 = notify::recommended_watcher(event_fn)?;
+
+    watcher1.watch(Path::new("/tmp/a"), RecursiveMode::Recursive)?;
+    watcher2.watch(Path::new("/tmp/b"), RecursiveMode::Recursive)?;
+
+    std::thread::park();
+    Ok(())
+}
+```
+
+### With a Tokio unbounded channel
+
+```rust
+use notify::{RecursiveMode, Result, Watcher};
+use std::path::Path;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(Path::new("."), RecursiveMode::NonRecursive)?;
+
+    while let Some(res) = rx.recv().await {
+        println!("event: {:?}", res);
+    }
+    Ok(())
+}
+```
+
+<Note>
+The Tokio sender integration requires the `tokio` Cargo feature:
+
+```toml
+notify = { version = "9.0.0-rc.5", features = ["tokio"] }
+```
+</Note>
